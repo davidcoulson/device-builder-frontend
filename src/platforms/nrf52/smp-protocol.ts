@@ -60,6 +60,14 @@ export class SmpNoReplyError extends Error {
   }
 }
 
+/** No reply to the first request of an upload: nothing says the device speaks SMP here. */
+export class SmpSilentDeviceError extends SmpNoReplyError {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause);
+    this.name = "SmpSilentDeviceError";
+  }
+}
+
 /**
  * The image is on the device and marked for its next boot, but the reset
  * did not go out: the device runs it once it is restarted.
@@ -306,6 +314,7 @@ export interface SmpUploadHooks {
 /** One upload's requests: numbers them and turns an error reply into a throw. */
 class SmpClient {
   private seq = 0;
+  private answered = false;
 
   constructor(
     private readonly transport: SmpTransport,
@@ -321,7 +330,16 @@ class SmpClient {
     failed: string
   ): Promise<SmpFrameInfo> {
     const frame = buildSmpFrame(op, group, id, this.seq++, payload);
-    const reply = parseSmpFrame(await this.transport.exchange(frame, this.signal));
+    const answer = await this.transport
+      .exchange(frame, this.signal)
+      .catch((err: unknown) => {
+        if (err instanceof SmpNoReplyError && !this.answered) {
+          throw new SmpSilentDeviceError(err.message, err.cause);
+        }
+        throw err;
+      });
+    this.answered = true;
+    const reply = parseSmpFrame(answer);
     if (reply.group !== group || reply.id !== id) {
       throw new SmpError(`SMP: unexpected reply while ${failed}`);
     }
