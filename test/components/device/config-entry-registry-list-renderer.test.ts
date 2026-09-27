@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LightEffect } from "../../../src/api/types/automations.js";
 import { ConfigEntryType } from "../../../src/api/types/config-entries.js";
 import "../../../src/components/device/config-entry-renderers/registry-list.js";
+import type { RenderCtx } from "../../../src/components/device/config-entry-renderers-shared.js";
 import { type ESPHomeRegistryList } from "../../../src/components/device/config-entry-renderers/registry-list.js";
 import { YamlRawValue } from "../../../src/util/yaml-serialize.js";
 import { makeEntry, makeRenderCtx } from "./_renderer-fixtures.js";
@@ -35,6 +36,7 @@ function mount(
     key?: string;
     catalog?: LightEffect[] | null;
     sectionKey?: string;
+    renderEntry?: RenderCtx["renderEntry"];
   } = {}
 ): { el: ESPHomeRegistryList; emit: EmitMock } {
   const emitFn = (options.emit ?? vi.fn()) as EmitMock;
@@ -48,7 +50,11 @@ function mount(
   });
   el.path = [key];
   el.ctx = makeRenderCtx(values, {
-    overrides: { emitChange: emitFn, sectionKey: options.sectionKey ?? "" },
+    overrides: {
+      emitChange: emitFn,
+      sectionKey: options.sectionKey ?? "",
+      ...(options.renderEntry ? { renderEntry: options.renderEntry } : {}),
+    },
   });
   document.body.append(el);
   // Mounting fires the element's connectedCallback which kicks the
@@ -600,6 +606,109 @@ describe("renderRegistryListField — per-row params sub-form", () => {
       type: ConfigEntryType.LAMBDA,
       path: ["filters", "1", "lambda"],
     });
+  });
+
+  it("passes a duration filter's precision to the row's value entry", async () => {
+    const renderEntry = vi.fn();
+    const catalog = [
+      {
+        id: "throttle",
+        name: "Throttle",
+        config_entries: [],
+        applies_to: [],
+        value_type: "time_period",
+        duration_min_unit: "ms",
+      },
+    ] as unknown as LightEffect[];
+    const { el } = mount(
+      { filters: [{ throttle: "10s" }] },
+      { key: "filters", registry: "filter", catalog, renderEntry }
+    );
+    await el.updateComplete;
+    expect(renderEntry.mock.calls.map((c) => c[0])).toContainEqual(
+      expect.objectContaining({
+        type: ConfigEntryType.TIME_PERIOD,
+        duration_min_unit: "ms",
+        accepts_duration_mapping: true,
+      })
+    );
+  });
+
+  it("renders a scalar row whose catalog body has not hydrated yet", async () => {
+    // The slim index row carries ``value_type`` but no ``config_entries``
+    // until its body arrives.
+    const renderEntry = vi.fn();
+    const catalog = [
+      { id: "throttle", name: "Throttle", value_type: "time_period" },
+    ] as unknown as LightEffect[];
+    const { el } = mount(
+      { filters: [{ throttle: "10s" }] },
+      { key: "filters", registry: "filter", catalog, renderEntry }
+    );
+    await el.updateComplete;
+    expect(renderEntry.mock.calls.map((c) => c[1])).toEqual([
+      ["filters", "0", "throttle"],
+    ]);
+  });
+
+  it("waits for the body before reading a mapping as a scalar-or-mapping row's value", async () => {
+    // ``heartbeat`` takes ``60s`` or ``{period: 60s}``; until its fields
+    // arrive the mapping can't be told from the value's own dict form.
+    const renderEntry = vi.fn();
+    const catalog = [
+      { id: "heartbeat", name: "Heartbeat", value_type: "time_period" },
+    ] as unknown as LightEffect[];
+    const { el } = mount(
+      { filters: [{ heartbeat: { period: "60s" } }] },
+      { key: "filters", registry: "filter", catalog, renderEntry }
+    );
+    await el.updateComplete;
+    expect(renderEntry).not.toHaveBeenCalled();
+  });
+
+  it.each(["float", "integer", "string", "lambda"])(
+    "leaves a mapping on a fieldless %s filter alone",
+    async (valueType) => {
+      // Only a duration has a mapping form; a lambda widget would show
+      // the mapping as "[object Object]".
+      const renderEntry = vi.fn();
+      const catalog = [
+        { id: "multiply", name: "Multiply", config_entries: [], value_type: valueType },
+      ] as unknown as LightEffect[];
+      const { el } = mount(
+        { filters: [{ multiply: { factor: 2 } }] },
+        { key: "filters", registry: "filter", catalog, renderEntry }
+      );
+      await el.updateComplete;
+      expect(renderEntry).not.toHaveBeenCalled();
+    }
+  );
+
+  it("renders the value entry for a mapping on a filter that has no fields", async () => {
+    // ``throttle: {seconds: 5}`` is the duration's own mapping form; with no
+    // catalog fields there is no sub-form it could be mistaken for.
+    const renderEntry = vi.fn();
+    const catalog = [
+      {
+        id: "throttle",
+        name: "Throttle",
+        config_entries: [],
+        applies_to: [],
+        value_type: "time_period",
+      },
+    ] as unknown as LightEffect[];
+    const { el } = mount(
+      { filters: [{ throttle: { seconds: 5 } }] },
+      { key: "filters", registry: "filter", catalog, renderEntry }
+    );
+    await el.updateComplete;
+    const calls = renderEntry.mock.calls.map((c) => ({
+      type: (c[0] as { type: string }).type,
+      path: c[1],
+    }));
+    expect(calls).toEqual([
+      { type: ConfigEntryType.TIME_PERIOD, path: ["filters", "0", "throttle"] },
+    ]);
   });
 
   it("marks a templatable scalar filter so the row gets a lambda toggle", async () => {
