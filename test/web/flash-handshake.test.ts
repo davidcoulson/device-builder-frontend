@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { HandoffFlasher } from "../../src/platforms/handoff.js";
 
 import {
   FlashHandshake,
@@ -17,6 +18,7 @@ function makeEnv(origin: string | null = null, nonce = "n1", webSerial = true) {
       params: { nonce, origin },
       messageTarget: target,
       webSerial,
+      flashers: ["esp", "rtl-ambz2"] as HandoffFlasher[],
     },
   };
 }
@@ -77,6 +79,7 @@ describe("FlashHandshake", () => {
       type: "esphome-web-flash:ready",
       version: 1,
       webSerial: true,
+      flashers: ["esp", "rtl-ambz2"],
     });
     expect("nonce" in (ready[0][0] as object)).toBe(false);
   });
@@ -120,6 +123,26 @@ describe("FlashHandshake", () => {
     fireMessage(target, { source: opener, data: firmware() });
     // A re-sent frame must not re-fire (it would reset the UI mid-flash).
     expect(onFirmware).toHaveBeenCalledOnce();
+  });
+
+  it("reports a frame naming an unknown flasher as malformed, and relays a done note", () => {
+    const { opener, target, env } = makeEnv();
+    const onFirmware = vi.fn();
+    const onMalformed = vi.fn();
+    const handshake = new FlashHandshake(env, { onFirmware, onMalformed });
+    handshake.start();
+    fireMessage(target, {
+      source: opener,
+      data: { ...firmware(), flasher: "toString" },
+    });
+    expect(onMalformed).toHaveBeenCalledOnce();
+    expect(onFirmware).not.toHaveBeenCalled();
+
+    handshake.postState("done", "close this tab", "reset the board");
+    handshake.postState("done", "close this tab");
+    const frames = opener.postMessage.mock.calls.map((c) => c[0] as object).slice(-2);
+    expect(frames[0]).toMatchObject({ state: "done", note: "reset the board" });
+    expect("note" in frames[1]).toBe(false);
   });
 
   it("fires onTimeout when no firmware arrives within the ready window", () => {
@@ -218,5 +241,11 @@ describe("FlashHandshake", () => {
     new FlashHandshake(env, { onFirmware: vi.fn(), onMalformed: vi.fn() }).start();
     // First attempt to the pinned origin threw; the catch retried to '*'.
     expect(opener.postMessage).toHaveBeenCalledWith(expect.anything(), "*");
+  });
+
+  it("advertises the flashers it has on ready, so a sender can decline up front", () => {
+    const { env, opener } = makeEnv();
+    new FlashHandshake(env, { onFirmware: vi.fn(), onMalformed: vi.fn() }).start();
+    expect(readyFrames(opener)[0][0]).toMatchObject({ flashers: ["esp", "rtl-ambz2"] });
   });
 });

@@ -8,8 +8,8 @@ import "../../../components/base-dialog.js";
 import { localizeContext } from "../../../context/index.js";
 import {
   type LibreTinyImage,
-  loadAmbz2Engine,
-  loadLibreTinyParser,
+  loadAmbz2Image,
+  runAmbz2,
 } from "../../../platforms/rtl87xx/index.js";
 import { espHomeStyles } from "../../../styles/shared.js";
 import { getErrorMessage } from "../../../util/error-message.js";
@@ -103,24 +103,19 @@ export class ESPHomeWebInstallRtlDialog extends LitElement {
     let image: LibreTinyImage;
     let port: SerialPort | null;
     try {
-      // The parser module is loaded here, not imported statically, so its
-      // error class comes from the loaded module too.
-      let parser: Awaited<ReturnType<typeof loadLibreTinyParser>> | undefined;
+      let bytes: Uint8Array;
       try {
-        const [mod, bytes] = await Promise.all([
-          loadLibreTinyParser(),
-          file.arrayBuffer(),
-        ]);
-        parser = mod;
-        image = mod.parseAmbz2Image(new Uint8Array(bytes));
+        bytes = new Uint8Array(await file.arrayBuffer());
       } catch (err) {
-        const key =
-          parser && err instanceof parser.Ambz2ImageError
-            ? err.key
-            : "firmware.rtl_bad_uf2";
-        this._fail(this._localize(key), getErrorMessage(err));
+        this._fail(this._localize("firmware.rtl_bad_uf2"), getErrorMessage(err));
         return;
       }
+      const parsed = await loadAmbz2Image(bytes);
+      if ("key" in parsed) {
+        this._fail(this._localize(parsed.key), parsed.detail);
+        return;
+      }
+      image = parsed.image;
       try {
         port = await requestSerialPort();
       } catch (err) {
@@ -138,34 +133,29 @@ export class ESPHomeWebInstallRtlDialog extends LitElement {
     this._abort = abort;
     // Closing the dialog aborts the run; its late hooks must not repaint it.
     const live = () => !abort.signal.aborted;
-    let rebooted: boolean;
-    try {
-      const { flashAmbz2 } = await loadAmbz2Engine();
-      rebooted = await flashAmbz2(port, image, {
-        signal: abort.signal,
-        onLog: (line) => {
-          if (live()) this._log(line);
-        },
-        onWaitingForStrap: () => {
-          if (live()) this._state = "waiting";
-        },
-        onLinked: () => {
-          if (live()) this._state = "flashing";
-        },
-        onProgress: (percent) => {
-          if (live()) this._progress = percent;
-        },
-      });
-    } catch (err) {
-      // The dialog closed and stopped the engine: nothing left to report to.
-      if (!live()) return;
-      this._fail(this._localize("firmware.rtl_flash_failed"), getErrorMessage(err));
-      return;
-    } finally {
-      if (this._abort === abort) this._abort = null;
-    }
+    const result = await runAmbz2(port, image, {
+      signal: abort.signal,
+      onLog: (line) => {
+        if (live()) this._log(line);
+      },
+      onWaitingForStrap: () => {
+        if (live()) this._state = "waiting";
+      },
+      onLinked: () => {
+        if (live()) this._state = "flashing";
+      },
+      onProgress: (percent) => {
+        if (live()) this._progress = percent;
+      },
+    });
+    if (this._abort === abort) this._abort = null;
+    // The dialog closed and stopped the engine: nothing left to report to.
     if (!live()) return;
-    this._manualReset = !rebooted;
+    if ("detail" in result) {
+      this._fail(this._localize("firmware.rtl_flash_failed"), result.detail);
+      return;
+    }
+    this._manualReset = !result.rebooted;
     this._state = "success";
   }
 

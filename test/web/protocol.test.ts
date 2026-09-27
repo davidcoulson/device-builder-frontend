@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isFlashParts } from "../../src/web/flash-receiver/protocol.js";
+import { isFlashParts, isHandoffFlasher } from "../../src/web/flash-receiver/protocol.js";
 
 const part = (address = 0, bytes = 8) => ({ address, data: new ArrayBuffer(bytes) });
 
@@ -38,5 +38,15 @@ describe("isFlashParts", () => {
     // Two 40 MiB parts → 80 MiB total, over the 64 MiB ceiling.
     const big = 40 * 1024 * 1024;
     expect(isFlashParts([part(0, big), part(0x1000, big)])).toBe(false);
+  });
+});
+
+describe("isHandoffFlasher", () => {
+  it("takes the ids this build knows and nothing inherited or foreign", () => {
+    expect(isHandoffFlasher("esp")).toBe(true);
+    expect(isHandoffFlasher("rtl-ambz2")).toBe(true);
+    expect(isHandoffFlasher("rtl-ambz1")).toBe(false);
+    expect(isHandoffFlasher("toString")).toBe(false);
+    expect(isHandoffFlasher(undefined)).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ function makeCallbacks(): FlasherCallbacks & {
   states: Array<{ state: string; detail: string }>;
   lost: number;
   unsupported: number;
+  reasons: string[];
   statuses: string[];
 } {
   const rec = {
@@ -31,8 +32,10 @@ function makeCallbacks(): FlasherCallbacks & {
     onLost() {
       this.lost += 1;
     },
-    onUnsupported() {
+    reasons: [] as string[],
+    onUnsupported(reason: string) {
       this.unsupported += 1;
+      this.reasons.push(reason);
     },
   };
   return rec;
@@ -53,10 +56,19 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const ESP = { flasher: "esp", erase: true } as const;
+const RTL = { flasher: "rtl-ambz2", erase: false } as const;
+
 describe("openFlasher", () => {
   it("returns null when the pop-up is blocked", () => {
     vi.spyOn(window, "open").mockReturnValue(null);
-    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", makeCallbacks());
+    const teardown = openFlasher(
+      new ArrayBuffer(8),
+      "f.bin",
+      "dev",
+      ESP,
+      makeCallbacks()
+    );
     expect(teardown).toBeNull();
   });
 
@@ -68,6 +80,7 @@ describe("openFlasher", () => {
       new ArrayBuffer(32),
       "firmware.factory.bin",
       "mys3t",
+      ESP,
       cb
     );
     expect(teardown).toBeTypeOf("function");
@@ -84,6 +97,9 @@ describe("openFlasher", () => {
     expect(msg.name).toBe("firmware.factory.bin");
     expect(msg.deviceName).toBe("mys3t");
     expect(msg.parts[0].address).toBe(0);
+    // The default hand-off is esptool's whole-chip factory write.
+    expect(msg.flasher).toBe("esp");
+    expect(msg.erase).toBe(true);
     expect(targetOrigin).toBe(FLASHER_ORIGIN);
     expect(transfer).toHaveLength(1);
 
@@ -99,7 +115,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb);
+    openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb);
     emit(fakeWin, { type: "esphome-web-flash:ready", version: 1, webSerial: false });
     expect(cb.unsupported).toBe(1);
     // No firmware was transferred to a tab that can never flash it.
@@ -117,7 +133,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb)!;
+    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb)!;
     emit(fakeWin, { type: "esphome-web-flash:ready", version: 1 });
     expect(fakeWin.postMessage).toHaveBeenCalledTimes(1);
     expect(cb.unsupported).toBe(0);
@@ -130,7 +146,7 @@ describe("openFlasher", () => {
     const cb = makeCallbacks();
     // Error is non-terminal (the close poll stays armed); tear down so the test
     // doesn't leak the interval into the worker.
-    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb)!;
+    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb)!;
     emit(fakeWin, { type: "esphome-web-flash:ready" });
     emit(fakeWin, {
       type: "esphome-web-flash:state",
@@ -146,7 +162,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb)!;
+    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb)!;
     emit(fakeWin, { type: "esphome-web-flash:ready" });
     emit(fakeWin, { type: "esphome-web-flash:state", state: "error", detail: "boom" });
     // Sit on the error, tab still open, well past the 10-min flash watchdog.
@@ -161,7 +177,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb);
+    openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb);
     emit(fakeWin, { type: "esphome-web-flash:ready" });
     emit(fakeWin, { type: "esphome-web-flash:state", state: "error", detail: "boom" });
     // User holds BOOT and retries in the same tab; the flasher streams again.
@@ -178,7 +194,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb)!;
+    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb)!;
     // A stray "done" before the firmware hand-off must not flip to success.
     emit(fakeWin, { type: "esphome-web-flash:state", state: "done" });
     emit(fakeWin, { type: "esphome-web-flash:progress", pct: 99 });
@@ -193,7 +209,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb);
+    openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb);
     vi.advanceTimersByTime(60 * 1000);
     expect(cb.lost).toBe(1);
     vi.useRealTimers();
@@ -204,7 +220,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb);
+    openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb);
     emit(fakeWin, { type: "esphome-web-flash:ready" });
     fakeWin.closed = true;
     vi.advanceTimersByTime(1000);
@@ -217,7 +233,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb);
+    openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb);
     emit(fakeWin, { type: "esphome-web-flash:ready" });
     emit(fakeWin, { type: "esphome-web-flash:state", state: "error", detail: "boom" });
     // User gives up on the failed flash and closes the tab.
@@ -233,7 +249,7 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb);
+    openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb);
     emit(fakeWin, { type: "esphome-web-flash:ready" });
     emit(fakeWin, { type: "esphome-web-flash:state", state: "error", detail: "boom" });
     // In-tab retry restarts (progress clears the errored guard), then the tab is
@@ -249,10 +265,86 @@ describe("openFlasher", () => {
     const fakeWin = { postMessage: vi.fn(), closed: false };
     vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
     const cb = makeCallbacks();
-    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", cb)!;
+    const teardown = openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb)!;
     teardown();
     emit(fakeWin, { type: "esphome-web-flash:ready" });
     expect(fakeWin.postMessage).not.toHaveBeenCalled();
     expect(cb.lost).toBe(0);
+  });
+
+  it("hands an RTL8720C UF2 to a receiver that lists its flasher, without erase", () => {
+    const fakeWin = { postMessage: vi.fn(), closed: false };
+    vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
+    const cb = makeCallbacks();
+    const teardown = openFlasher(new ArrayBuffer(8), "f.uf2", "bw15", RTL, cb)!;
+    emit(fakeWin, {
+      type: "esphome-web-flash:ready",
+      version: 1,
+      webSerial: true,
+      flashers: ["esp", "rtl-ambz2"],
+    });
+    expect(fakeWin.postMessage).toHaveBeenCalledTimes(1);
+    const [msg] = fakeWin.postMessage.mock.calls[0];
+    expect(msg.flasher).toBe("rtl-ambz2");
+    expect(msg.erase).toBe(false);
+    teardown();
+  });
+
+  it("declines an RTL8720C hand-off to an older receiver that lists no flashers", () => {
+    const fakeWin = { postMessage: vi.fn(), closed: false };
+    vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
+    const cb = makeCallbacks();
+    openFlasher(new ArrayBuffer(8), "f.uf2", "bw15", RTL, cb);
+    // web.esphome.io before this protocol addition: esptool only.
+    emit(fakeWin, { type: "esphome-web-flash:ready", version: 1, webSerial: true });
+    expect(cb.reasons).toEqual(["flasher"]);
+    expect(fakeWin.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("declines when the receiver lists flashers but not this one", () => {
+    const fakeWin = { postMessage: vi.fn(), closed: false };
+    vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
+    const cb = makeCallbacks();
+    openFlasher(new ArrayBuffer(8), "f.uf2", "bw15", RTL, cb);
+    emit(fakeWin, { type: "esphome-web-flash:ready", version: 1, flashers: ["esp"] });
+    expect(cb.reasons).toEqual(["flasher"]);
+  });
+
+  it("passes the receiver's done note on, and nothing from an older receiver's detail", () => {
+    const fakeWin = { postMessage: vi.fn(), closed: false };
+    vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
+    const cb = makeCallbacks();
+    openFlasher(new ArrayBuffer(8), "f.uf2", "bw15", RTL, cb);
+    emit(fakeWin, {
+      type: "esphome-web-flash:ready",
+      version: 1,
+      flashers: ["esp", "rtl-ambz2"],
+    });
+    emit(fakeWin, {
+      type: "esphome-web-flash:state",
+      state: "done",
+      detail: "close this tab",
+      note: "reset the board",
+    });
+    expect(cb.states).toEqual([{ state: "done", detail: "reset the board" }]);
+  });
+
+  it("reads a flashers field that is not a list as esptool only", () => {
+    const fakeWin = { postMessage: vi.fn(), closed: false };
+    vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
+    const cb = makeCallbacks();
+    openFlasher(new ArrayBuffer(8), "f.uf2", "bw15", RTL, cb);
+    emit(fakeWin, { type: "esphome-web-flash:ready", version: 1, flashers: "rtl-ambz2" });
+    expect(cb.reasons).toEqual(["flasher"]);
+    expect(fakeWin.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("names the browser, not the flasher, when Web Serial is what is missing", () => {
+    const fakeWin = { postMessage: vi.fn(), closed: false };
+    vi.spyOn(window, "open").mockReturnValue(fakeWin as unknown as Window);
+    const cb = makeCallbacks();
+    openFlasher(new ArrayBuffer(8), "f.bin", "dev", ESP, cb);
+    emit(fakeWin, { type: "esphome-web-flash:ready", version: 1, webSerial: false });
+    expect(cb.reasons).toEqual(["web-serial"]);
   });
 });

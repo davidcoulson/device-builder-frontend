@@ -236,9 +236,10 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
     this._statusMessage = this._localize("firmware.status_queued");
   }
 
-  // "Flash via USB": compile + download the factory image here (logs/errors
-  // visible), then land on the ready step. The flasher tab is opened only when
-  // the user clicks Open USB flasher — never before a working image exists.
+  // "Flash via USB": compile + download the image here (logs/errors visible),
+  // then land on the ready step. The flasher tab is opened only when the user
+  // clicks Open USB flasher — never before a working image exists. The
+  // device's platform decides the image and the flasher (see handoffFor).
   installUsbFlash(device: ConfiguredDevice) {
     this._begin(device, "web-flash");
     void startUsbFlash(this);

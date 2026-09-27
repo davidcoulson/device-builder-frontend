@@ -1,13 +1,16 @@
 import {
   type FirmwareMessage,
   type FlashState,
+  type HandoffFlasher,
   isFlashParts,
+  isHandoffFlasher,
   MSG_FIRMWARE,
   MSG_PROGRESS,
   MSG_READY,
   MSG_STATE,
   PROTOCOL_VERSION,
   type ReadyMessage,
+  type StateMessage,
 } from "./protocol.js";
 
 /** Hash params the receiver reads. ``nonce`` is required to activate. */
@@ -50,6 +53,8 @@ export interface FlashHandshakeEnv {
    * instead of transferring firmware to a tab that can never use it.
    */
   webSerial: boolean;
+  /** The flashers this page has, advertised the same way. */
+  flashers: HandoffFlasher[];
 }
 
 /** How long to keep re-announcing ``ready`` before giving up (ms). */
@@ -107,8 +112,10 @@ export class FlashHandshake {
     );
   }
 
-  postState(state: FlashState, detail?: string): void {
-    this._post({ type: MSG_STATE, state, detail });
+  postState(state: FlashState, detail?: string, note?: string): void {
+    const msg: StateMessage = { type: MSG_STATE, state, detail };
+    if (note) msg.note = note;
+    this._post(msg);
   }
 
   postProgress(pct: number): void {
@@ -120,6 +127,7 @@ export class FlashHandshake {
       type: MSG_READY,
       version: PROTOCOL_VERSION,
       webSerial: this.env.webSerial,
+      flashers: this.env.flashers,
     };
     this._post(msg);
   }
@@ -157,7 +165,12 @@ export class FlashHandshake {
     // Ignore a duplicate firmware frame once we've handed off — re-processing
     // would reset the UI to "connecting" and relay a bogus state mid-flash.
     if (this._handedOff) return;
-    if (!isFlashParts(data.parts)) {
+    // An unknown flasher id is as unusable as bad parts: the engine registry
+    // is keyed by the id, and a dashboard only sends one this page advertised.
+    if (
+      !isFlashParts(data.parts) ||
+      (data.flasher !== undefined && !isHandoffFlasher(data.flasher))
+    ) {
       // The opener has clearly attached; stop re-announcing even though the
       // payload is unusable.
       this._stopReadyRetry();
