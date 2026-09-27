@@ -197,4 +197,73 @@ describe("section reload keeps the form mounted", () => {
     expect(form(c)).toBeNull();
     expect(c.shadowRoot!.querySelector(".error")).not.toBeNull();
   });
+
+  describe("a YAML edited outside the form (#1906)", () => {
+    const EDITED = YAML.replace("sensor:", "sensor: # by hand");
+
+    async function reloadWith(c: ESPHomeDeviceSectionConfig, yaml: string) {
+      c.yaml = yaml;
+      c.reload();
+      await flush();
+      await c.updateComplete;
+    }
+
+    const reads = (c: ESPHomeDeviceSectionConfig): number => form(c).valuesRead;
+
+    it("tells the form at once, before the reload that follows a second later", async () => {
+      const { c } = await firstLoad();
+      const before = reads(c);
+
+      c.yaml = EDITED;
+      await c.updateComplete;
+
+      expect(reads(c)).toBe(before + 1);
+    });
+
+    it("tells the form again once the values were read", async () => {
+      const { c } = await firstLoad();
+      const before = reads(c);
+
+      await reloadWith(c, EDITED);
+
+      expect(reads(c)).toBe(before + 2);
+    });
+
+    it("does not for the YAML the section wrote itself", async () => {
+      const { c, inner } = await firstLoad();
+      const before = reads(c);
+      expect(before).toBeGreaterThan(0);
+
+      inner._lastSelfWrittenYaml = EDITED;
+      await reloadWith(c, EDITED);
+
+      expect(reads(c)).toBe(before);
+    });
+
+    it("does not count a read of the draft the form wrote while the load waited", async () => {
+      const { c, inner } = await firstLoad();
+      c.yaml = EDITED;
+      await c.updateComplete;
+      const before = reads(c);
+
+      c.reload();
+      // The form emits a draft before the load has its component.
+      inner._lastSelfWrittenYaml = EDITED;
+      await flush();
+      await c.updateComplete;
+
+      expect(reads(c)).toBe(before);
+    });
+
+    it("counts a read when the values are there, not when the load starts", async () => {
+      const { c, settle } = await firstLoad();
+      const before = reads(c);
+
+      await switchToSwitch(c);
+      expect(reads(c)).toBe(before);
+
+      await settle("switch.template");
+      expect(reads(c)).toBe(before + 1);
+    });
+  });
 });

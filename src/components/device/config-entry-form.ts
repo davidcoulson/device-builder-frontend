@@ -70,9 +70,11 @@ import {
   renderYamlOnlyField,
 } from "./config-entry-renderers-shared.js";
 import { rowMemoryCtx } from "./config-entry-renderers/row-memory-ctx.js";
+import { ValueMemory } from "./config-entry-renderers/value-memory.js";
 import { ConstraintClusterController } from "./constraint-cluster-controller.js";
 import { FieldFocusController } from "./field-focus-controller.js";
 import { FieldScrollController } from "./field-scroll-controller.js";
+import { closePinAdvanced } from "./pin/advanced-key.js";
 
 import "@home-assistant/webawesome/dist/components/divider/divider.js";
 import "@home-assistant/webawesome/dist/components/icon/icon.js";
@@ -277,6 +279,14 @@ export class ESPHomeConfigEntryForm extends LitElement {
   @property({ attribute: false })
   presentComponents: ReadonlySet<string> = new Set();
 
+  /** Goes up when the owner's YAML was edited outside the form, and when
+   *  the owner read ``values`` from it. The form is not told what moved,
+   *  so it then forgets what could write a value the user did not just
+   *  enter: it could sit on another field by now. What is only shown, such
+   *  as open groups, is kept. */
+  @property({ attribute: false })
+  valuesRead = 0;
+
   /** Instance-relative field path to scroll into view, from the YAML cursor. */
   @property({ attribute: false })
   focusFieldPath?: string[];
@@ -305,33 +315,7 @@ export class ESPHomeConfigEntryForm extends LitElement {
    *  of the sync); owns its own listener lifecycle. */
   protected readonly _fieldFocus = new FieldFocusController(this);
 
-  /**
-   * Transient unit choice for FLOAT_WITH_UNIT entries the user
-   * picked before typing a numeric value. Keyed by dotted path.
-   * `chooseDisplayUnit` reads this layer before falling back to
-   * the catalog default, so the picker survives a rerender even
-   * when the form value is still `""`.
-   *
-   * The setter (in `_buildCtx`) calls `requestUpdate()` because
-   * a unit-only pick doesn't reach the form's value-change cycle
-   * — no `emit()` happens — so Lit needs the explicit nudge.
-   *
-   * Cleared on `entries` change so a different component's picks
-   * don't bleed across; otherwise superseded once a non-empty
-   * `parsed.unit` from the form value beats the pending layer.
-   */
-  private _pendingUnits: Map<string, string> = new Map();
-
-  /**
-   * Transient raw-text buffer for FLOAT_WITH_UNIT magnitude inputs.
-   * `<input type="number">` reads `""` from `.value` for
-   * mid-typing intermediates (`"-"`, `"1e"`, `"1."`); Lit's
-   * `.value=` property binding then re-writes `""` over the
-   * partial text. The renderer reads from this buffer first so
-   * partial input survives until the user produces a parseable
-   * value (which lands in `this.values` normally) or blurs.
-   */
-  private _editingMagnitudes: Map<string, string> = new Map();
+  private readonly _valueMemory = new ValueMemory(this);
 
   /** Either/or constraint-cluster (radio chooser) choice + stash state and the
    *  post-render radio-group sync; kept in a controller so this file doesn't
@@ -645,22 +629,29 @@ export class ESPHomeConfigEntryForm extends LitElement {
    *  treated atomically (required if any member is) so its members stay
    *  contiguous and ``orderExclusiveGroups`` folds them at the same slot. */
   protected willUpdate(changed: PropertyValues) {
-    // A different entry list means the form was re-targeted to a
-    // different component (e.g. the dep-flow detour swapping
-    // ES7210 for i2c). Drop transient unit picks from the previous
-    // shape so they don't bleed into unrelated paths.
+    // The form was re-targeted to other entries (e.g. the dep-flow detour
+    // swapping ES7210 for i2c), or its values were read again from a YAML
+    // edited outside it: drop what could write a value at a path that may
+    // now be another field.
     const previous = changed.get("entries") as ConfigEntry[] | undefined;
-    if (changed.has("entries") && previous !== undefined) {
-      // A stash holds what the user typed on the side they left, so it is
-      // dropped only for another target, not for the same one rebuilt.
-      if (!sameEntryTarget(previous, this.entries)) {
-        clearTemplatableStash(this);
-        clearEnableStash(this);
-      }
-      this._pendingUnits.clear();
-      this._editingMagnitudes.clear();
-      this._openAdvancedPlacement.clear();
+    const retargeted = changed.has("entries") && previous !== undefined;
+    const reread = changed.has("valuesRead");
+    // A stash holds what the user typed on the side they left, so it is
+    // dropped for another target and for values read again from the YAML,
+    // not for the same target rebuilt.
+    if (reread || (retargeted && !sameEntryTarget(previous, this.entries))) {
+      clearTemplatableStash(this);
+      clearEnableStash(this);
+    }
+    if (reread || retargeted) {
+      this._valueMemory.clear();
       this._constraintClusters.reset();
+    }
+    // A pin's open Advanced panel writes under the pin; on a pin that is
+    // short form by now that write would drop the GPIO.
+    if (reread) closePinAdvanced(this._nestedOpenSections, this._seededNestedOpen);
+    if (retargeted) {
+      this._openAdvancedPlacement.clear();
       this._expandedOptionFields.clear();
       // Re-seed disclosures for the new component; a key like "pin:pin-advanced"
       // recurs across sections, and the form instance is reused.
@@ -1089,28 +1080,9 @@ export class ESPHomeConfigEntryForm extends LitElement {
       scopeValues: (path) => this._scopeValues(path),
       filterRenderable: this._filterRenderable,
       requiredGroups: this.requiredGroups,
-      getPendingUnit: (path) => this._pendingUnits.get(path.join(".")),
-      setPendingUnit: (path, unit) => {
-        this._pendingUnits.set(path.join("."), unit);
-        // Trigger a re-render so the picker reflects the stash.
-        // Mutating the Map alone won't, since `_pendingUnits` isn't
-        // a `@state`-tracked field.
-        this.requestUpdate();
-      },
-      getEditingMagnitude: (path) => this._editingMagnitudes.get(path.join(".")),
-      setEditingMagnitude: (path, text) => {
-        // No requestUpdate — the @input handler that calls this
-        // also emits a value-change which re-renders us via the
-        // owner's normal value-prop update. Triggering here would
-        // double the work on every keystroke.
-        this._editingMagnitudes.set(path.join("."), text);
-      },
-      clearEditingMagnitude: (path) => {
-        this._editingMagnitudes.delete(path.join("."));
-      },
+      ...this._valueMemory.ctx,
       ...rowMemoryCtx(this, this._constraintClusters, this._expandedOptionFields, [
-        this._pendingUnits,
-        this._editingMagnitudes,
+        ...this._valueMemory.stores,
         this._nestedOpenSections,
         this._seededNestedOpen,
       ]),
