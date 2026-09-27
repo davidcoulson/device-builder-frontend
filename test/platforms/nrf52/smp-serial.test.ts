@@ -3,10 +3,12 @@ import { disconnectEvents } from "../../_web-serial.js";
 import {
   buildSmpFrame,
   parseMcubootImage,
+  SmpRestartNeededError,
 } from "../../../src/platforms/nrf52/smp-protocol.js";
 import {
   encodeSerialFrame,
   flashMcubootOverSerial,
+  isSerialDeviceLost,
   SmpSerialDecoder,
 } from "../../../src/platforms/nrf52/smp-serial.js";
 import { FakeSmpDevice } from "./_fake-smp-device.js";
@@ -126,10 +128,22 @@ function makePort({
   smp = new FakeSmpDevice(),
   silent = false,
   strayReply = false,
-}: { smp?: FakeSmpDevice; silent?: boolean; strayReply?: boolean } = {}) {
+  resetWriteLost = false,
+}: {
+  smp?: FakeSmpDevice;
+  silent?: boolean;
+  strayReply?: boolean;
+  resetWriteLost?: boolean;
+} = {}) {
   let rx!: ReadableStreamDefaultController<Uint8Array>;
+  let writeLost = false;
   const decoder = new SmpSerialDecoder((frame) => {
     if (silent) return;
+    // Group 0, command 5: the reset.
+    if (resetWriteLost && frame[5] === 0 && frame[7] === 5) {
+      writeLost = true;
+      return;
+    }
     void smp.exchange(frame).then((reply) => {
       if (strayReply) {
         // A late answer to an earlier request, numbered differently.
@@ -158,7 +172,11 @@ function makePort({
   };
   const readable = new ReadableStream<Uint8Array>({ start: (c) => (rx = c) });
   const writable = new WritableStream<Uint8Array>({
-    write: (bytes) => decoder.push(bytes),
+    write: (bytes) => {
+      decoder.push(bytes);
+      // The browser fails the write to a device that is gone.
+      if (writeLost) throw new DOMException("", "NetworkError");
+    },
   });
   return { port: port as unknown as SerialPort, mock: port, smp };
 }
@@ -213,5 +231,61 @@ describe("flashMcubootOverSerial", () => {
 
     await expect(done).rejects.toThrow("no response from the device");
     expect(fake.mock.close).toHaveBeenCalled();
+    await expect(done).rejects.not.toSatisfy(isSerialDeviceLost);
+  });
+
+  it("names a device that is unplugged while a reply is awaited", async () => {
+    const fake = makePort({ silent: true });
+    const image = await parseMcubootImage(makeMcubootImage());
+    const done = flashMcubootOverSerial(fake.port, image, { onProgress: () => {} });
+    done.catch(() => {});
+    await vi.advanceTimersByTimeAsync(100);
+    fake.mock.fire();
+
+    await expect(done).rejects.toSatisfy(isSerialDeviceLost);
+    expect(fake.mock.close).toHaveBeenCalled();
+  });
+
+  it("takes the device leaving the bus before it answers as the reset it asked for", async () => {
+    const smp = new FakeSmpDevice();
+    const fake = makePort({ smp });
+    const exchange = smp.exchange.bind(smp);
+    smp.exchange = (frame) => {
+      // Group 0, command 5: the reset.
+      if (frame[5] !== 0 || frame[7] !== 5) return exchange(frame);
+      // After the write, as the device takes the request in first.
+      setTimeout(() => fake.mock.fire(), 10);
+      return new Promise(() => {});
+    };
+    const { done } = await flashOverSerial(fake);
+
+    await expect(done).resolves.toBeUndefined();
+  });
+
+  it("asks for a restart when the device left ahead of the reset", async () => {
+    const smp = new FakeSmpDevice();
+    const fake = makePort({ smp });
+    const exchange = smp.exchange.bind(smp);
+    smp.exchange = (frame) => {
+      // Op 2, group 1, command 0: the image marked for test, a second
+      // before the reset is asked for.
+      if (frame[0] === 2 && frame[5] === 1 && frame[7] === 0) {
+        setTimeout(() => fake.mock.fire(), 100);
+      }
+      return exchange(frame);
+    };
+    const { done, image } = await flashOverSerial(fake);
+
+    await expect(done).rejects.toBeInstanceOf(SmpRestartNeededError);
+    await expect(done).rejects.not.toSatisfy(isSerialDeviceLost);
+    expect(smp.received).toEqual(image.bytes);
+  });
+
+  it("asks for a restart when the device left under the reset's write", async () => {
+    const fake = makePort({ resetWriteLost: true });
+    const { done, image } = await flashOverSerial(fake);
+
+    await expect(done).rejects.toBeInstanceOf(SmpRestartNeededError);
+    expect(fake.smp.received).toEqual(image.bytes);
   });
 });

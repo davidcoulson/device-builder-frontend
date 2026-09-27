@@ -26,12 +26,17 @@ vi.mock("../../../src/platforms/nrf52/smp-engine.js", async (importOriginal) => 
 
 import type { ConfiguredDevice } from "../../../src/api/types/devices.js";
 import { SMP_BLE_SERVICE_UUID } from "../../../src/platforms/nrf52/smp-ble-service.js";
-import { SmpBleServiceNotFoundError } from "../../../src/platforms/nrf52/smp-engine.js";
+import {
+  SmpBleServiceNotFoundError,
+  SmpNoReplyError,
+  SmpRestartNeededError,
+} from "../../../src/platforms/nrf52/smp-engine.js";
 import {
   nrfSmpBleInstall,
   nrfSmpSerialInstall,
 } from "../../../src/platforms/nrf52/smp-install.js";
 import type { AnyBrowserInstall } from "../../../src/platforms/platform-support.js";
+import { SerialDeviceLostError } from "../../../src/util/serial-open-error.js";
 import {
   asHost,
   bin,
@@ -200,5 +205,35 @@ describe("MCUboot install over Bluetooth", () => {
     await flash(nrfSmpBleInstall, host);
 
     expect(host._statusMessage).toBe("firmware.nrf_smp_ble_service_not_found");
+  });
+});
+
+describe("MCUboot install over serial", () => {
+  const lost = new SerialDeviceLostError();
+
+  it("asks for a restart when the reset could not be sent", async () => {
+    const host = makeHost();
+    await nrfSmpSerialInstall.start(asHost(host));
+    mocks.flashMcubootOverSerial.mockRejectedValue(new SmpRestartNeededError(lost));
+
+    await flash(nrfSmpSerialInstall, host);
+
+    expect(host._step).toBe("error");
+    expect(host._statusMessage).toBe("firmware.nrf_smp_restart_needed_title");
+    expect(host._errorMessage).toBe("firmware.nrf_smp_restart_needed");
+  });
+
+  it.each([
+    ["a write", lost],
+    ["the wait for a reply", new SmpNoReplyError(lost.message, lost)],
+  ])("says the device disconnected when %s finds it gone", async (_name, err) => {
+    const host = makeHost();
+    await nrfSmpSerialInstall.start(asHost(host));
+    mocks.flashMcubootOverSerial.mockRejectedValue(err);
+
+    await flash(nrfSmpSerialInstall, host);
+
+    expect(host._statusMessage).toBe("firmware.nrf_smp_serial_failed");
+    expect(host._errorMessage).toBe("serial.device_lost");
   });
 });
