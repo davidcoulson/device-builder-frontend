@@ -14,7 +14,7 @@
  * because the shape is renderer-specific (RenderCtx is private
  * to ``components/device``).
  */
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 import {
   extractAttributeBindings,
   findTemplatesByAnchor,
@@ -129,8 +129,7 @@ export function makeRenderCtx(
     getEditingMagnitude: () => undefined,
     setEditingMagnitude: vi.fn(),
     clearEditingMagnitude: vi.fn(),
-    rowRemoved: vi.fn(),
-    rowKindChanged: vi.fn(),
+    rowsMoved: vi.fn(),
     reactiveConstraintPaths: new Set<string>(),
     getClusterChoice: () => undefined,
     setClusterChoice: vi.fn(),
@@ -206,4 +205,15 @@ export function makeEmitCtx(
     overrides: { emitChange, ...overrides },
   });
   return { ctx, emitChange };
+}
+
+/** Where the one ``rowsMoved`` call on *ctx* sends rows 0..*rows*-1. */
+export function reportedRowMoves(
+  ctx: RenderCtx,
+  rows: number
+): [string[], (number | null)[]] {
+  const calls = vi.mocked(ctx.rowsMoved).mock.calls;
+  expect(calls).toHaveLength(1);
+  const [path, move] = calls[0];
+  return [path, Array.from({ length: rows }, (_, row) => move(row))];
 }
