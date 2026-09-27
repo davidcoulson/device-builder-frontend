@@ -2032,6 +2032,7 @@
     },
     "install": {
       "preparing": "Preparing firmware…",
+      "tools_load_failed": "Could not load the flashing tools. Check your connection and retry.",
       "erasing": "Erasing device…",
       "done": "Installation complete",
       "unsupported_chip": "There's no ready-made ESPHome Web firmware for the {chip} (for example, chips without built-in Wi-Fi). Create a device in your ESPHome Device Builder and install it from there instead.",
@@ -2076,8 +2077,6 @@
       "install_waiting_hint": "Your device has been reset and is entering DFU mode. Click Continue when ready. If no new port appears, the firmware on the board did not act on the reset: double-press the board's reset button to enter the bootloader by hand, then click Continue.",
       "install_flashing": "Installing firmware…",
       "install_reconnecting": "Device disconnected. Waiting for it to reconnect, then retrying…",
-      "install_error_no_file": "Select a DFU package first.",
-      "install_error_bad_package": "Invalid DFU package: {error}",
       "install_error_flash": "Firmware update failed: {error}"
     }
   },
