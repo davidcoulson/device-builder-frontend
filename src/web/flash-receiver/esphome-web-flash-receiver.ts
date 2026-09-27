@@ -30,6 +30,7 @@ import {
   RECEIVER_ENGINES,
   type ReceiverNote,
   type ReceiverRun,
+  type ReceiverRunHooks,
 } from "./receiver-engine.js";
 import {
   prepareForReceiver,
@@ -50,7 +51,8 @@ const MAX_LOG_LINES = 10000;
  * — the hand-off the dashboard uses when it can't flash itself (HA add-on over
  * plain http, where Web Serial is blocked). It authenticates the opener, takes
  * the firmware over postMessage, flashes it with the engine the frame names
- * (esptool by default, the RTL8720C ROM downloader; see ``receiver-engine.ts``),
+ * (esptool by default, the RTL8720C ROM downloader, PICOBOOT for a Pico; see
+ * ``receiver-engine.ts``),
  * and relays state/progress back so the dashboard mirrors it. A manual file
  * picker is the fallback if no firmware arrives; it flashes ESP images.
  */
@@ -202,8 +204,7 @@ export class ESPHomeWebFlashReceiver extends LitElement {
     if (this._fileInput && this._preparation.state.kind === "idle") {
       this._fileInput.value = "";
     }
-    const prepared = this._preparation.state;
-    if (prepared.kind === "ready") this._logsPolicy = prepared.value.logs;
+    if (this._plan) this._logsPolicy = this._plan.logs;
     if (error !== null) this._setState("error", error);
     else if (this._firmware) this._setState("connecting", this._readyMessage());
     else this._resetForRetry();
@@ -269,23 +270,79 @@ export class ESPHomeWebFlashReceiver extends LitElement {
       return;
     }
     if (this._working) return;
-    const preparation = this._preparation.state;
-    if (preparation.kind === "ready") {
-      await this._runInstall(preparation.value.run);
+    const plan = this._plan;
+    if (plan) {
+      await this._runInstall(plan.run);
       return;
     }
-    if (preparation.kind !== "retryable") return;
+    if (this._preparation.state.kind !== "retryable") return;
     // A chunk did not load earlier; load it again. The install is offered
     // once that is done, on a click of its own.
     this._setState("connecting", this._localize("web.install.preparing"));
     this._preparation.retry();
   }
 
-  private async _runInstall(run: ReceiverRun): Promise<void> {
+  /** The ready plan, which the install and the engine's own copy come from. */
+  private get _plan(): ReceiverPrepared | undefined {
+    const preparation = this._preparation.state;
+    return preparation.kind === "ready" ? preparation.value : undefined;
+  }
+
+  /**
+   * Runs an engine's step from the click: nothing is awaited before it, as
+   * it opens the chooser. Null when it failed or the chooser was dismissed.
+   */
+  private async _engine<T>(
+    step: (hooks: ReceiverRunHooks) => Promise<T | "dismissed" | null>
+  ): Promise<T | null> {
     this._busy = true;
+    this._waiting = null;
+    let outcome: T | "dismissed" | null;
+    try {
+      outcome = await step({
+        onState: (state, message) => {
+          this._waiting = null;
+          this._setState(state, message);
+        },
+        onProgress: (pct) => this._setProgress(pct),
+        onLog: (line) => this._log.enqueue(line),
+        onWaiting: (note) => {
+          this._waiting = note;
+          // The dashboard shows the instruction too, on the state it mirrors.
+          if (this._state !== "idle") {
+            this._handshake?.postState(this._state, this._statusMessage, note.message);
+          }
+        },
+      });
+    } catch (err) {
+      // An engine broke its never-throws contract; the card must not stay busy.
+      console.error("[flash receiver] The engine threw:", err);
+      this._waiting = null;
+      this._setState("error", getErrorMessage(err));
+      return null;
+    } finally {
+      this._busy = false;
+      // The last lines are not left to a frame that may never come.
+      this._log.flush();
+    }
+    if (outcome !== "dismissed") return outcome;
+    this._resetForRetry();
+    // The opener saw what the engine said ahead of its chooser; take it back.
+    if (this._state !== "idle") {
+      this._handshake?.postState(this._state, this._statusMessage);
+    }
+    return null;
+  }
+
+  private async _onBefore(): Promise<void> {
+    const before = this._plan?.before;
+    if (!before || this._working || this._flashDone) return;
+    await this._engine(before.run);
+  }
+
+  private async _runInstall(run: ReceiverRun): Promise<void> {
     this._flashDone = false;
     this._progress = null;
-    this._waiting = null;
     // End any prior flash's log session outright: the generation bump only
     // supersedes a still-pending acquisition; closing the dialog releases a
     // streaming one (after-hide → _stop), and the stale handle must not
@@ -295,29 +352,7 @@ export class ESPHomeWebFlashReceiver extends LitElement {
     this._logPort = undefined;
     this._resetLog();
 
-    const result = await run({
-      onState: (state, message) => {
-        this._waiting = null;
-        this._setState(state, message);
-      },
-      onProgress: (pct) => this._setProgress(pct),
-      onLog: (line) => this._log.enqueue(line),
-      onWaiting: (note) => {
-        this._waiting = note;
-        // The dashboard shows the instruction too, on the state it mirrors.
-        if (this._state !== "idle") {
-          this._handshake?.postState(this._state, this._statusMessage, note.message);
-        }
-      },
-    });
-
-    this._busy = false;
-    // The last lines are not left to a frame that may never come.
-    this._log.flush();
-    if (result === "dismissed") {
-      this._resetForRetry();
-      return;
-    }
+    const result = await this._engine(run);
     if (!result) return;
 
     this._flashDone = true;
@@ -325,9 +360,8 @@ export class ESPHomeWebFlashReceiver extends LitElement {
     this._waiting = result.note ?? null;
     this._setState(
       "done",
-      this._hasOpener
-        ? this._localize("web.flash.done_opener")
-        : this._localize("web.flash.done"),
+      result.message ??
+        this._localize(this._hasOpener ? "web.flash.done_opener" : "web.flash.done"),
       result.note?.message
     );
     const { logs } = result;
@@ -382,7 +416,7 @@ export class ESPHomeWebFlashReceiver extends LitElement {
     if (this._preparation.state.kind === "retryable") {
       return this._localize("command.retry");
     }
-    return this._localize("web.flash.connect_install");
+    return this._plan?.primaryLabel ?? this._localize("web.flash.connect_install");
   }
 
   // Flashing, or getting the firmware ready to.
@@ -396,6 +430,7 @@ export class ESPHomeWebFlashReceiver extends LitElement {
   }
 
   private get _hint(): string {
+    if (this._plan?.hint) return this._plan.hint;
     return this._hasOpener
       ? this._localize("web.flash.hint_opener")
       : this._localize("web.flash.hint_direct");
@@ -481,6 +516,18 @@ export class ESPHomeWebFlashReceiver extends LitElement {
                     @click=${this._onViewLogs}
                   >
                     ${this._localize("dashboard.logs")}
+                  </button>`
+                : nothing
+            }
+            ${
+              this._plan?.before && !this._flashDone
+                ? html`<button
+                    id="btn-before"
+                    class="action-btn action-btn--ghost"
+                    ?disabled=${this._working}
+                    @click=${this._onBefore}
+                  >
+                    ${this._plan.before.label}
                   </button>`
                 : nothing
             }
