@@ -612,7 +612,9 @@
     "connect_timed_out": "No answer from the device in {seconds} seconds. Check that an ESP board is on this port, then unplug and replug the cable or hold the BOOT button while plugging in.",
     "unsupported_chip": "This looks like an {chip}, which browser flashing doesn't support yet. Download the firmware and flash it from the command line with esptool instead.",
     "open_failed": "Could not open the serial port: {error}",
-    "port_in_use": "Could not open the serial port; it may be open in another tab or program. Close it there and try again. ({error})"
+    "port_in_use": "Could not open the serial port; it may be open in another tab or program. Close it there and try again. ({error})",
+    "open_timed_out": "The serial port did not open within {seconds} seconds. Unplug and replug the board, then try again.",
+    "port_held": "The serial port could not be released. Unplug and replug the board, then try again."
   },
   "wizard": {
     "title_create": "Create configuration",
@@ -634,6 +636,7 @@
     "connect_your_board_detecting": "Detecting the connected board…",
     "connect_your_board_detect_failed": "Could not detect the connected board. Check the cable and try another port.",
     "connect_your_board_unrecognized": "Could not tell which board this is from its USB ids. Pick it from the list below.",
+    "connect_your_board_unknown_catalog_board": "This board calls itself \"{board}\", but no catalog board by that name could be found. Pick the closest board below.",
     "detected_chip_family": "{family} detected — pick your specific board",
     "show_all_boards": "Show all boards",
     "how_create": "How would you like to create your project?",
