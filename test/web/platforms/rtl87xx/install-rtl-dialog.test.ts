@@ -36,6 +36,7 @@ vi.mock("../../../../src/platforms/rtl87xx/index.js", async (importOriginal) => 
 
 import { pickerText, pickFile, slowFile, watchFileInput } from "../../_pick-file.js";
 import { identityLocalize, mount } from "../../../_dom.js";
+import { lapsedPick } from "../../../_web-serial.js";
 import { Ambz2ImageError } from "../../../../src/platforms/rtl87xx/libretiny-uf2.js";
 import { ESPHomeWebInstallRtlDialog } from "../../../../src/web/platforms/rtl87xx/esphome-web-install-rtl-dialog.js";
 
@@ -226,6 +227,15 @@ describe("esphome-web-install-rtl-dialog", () => {
     await el.updateComplete;
     expect(pickerText(el)).toEqual({ name: "firmware.uf2", status: "", error: "" });
     expect(installDisabled(el)).toBe(false);
+  });
+
+  it("says to click again for a picker refused after the click ran out", async () => {
+    const el = await mountDialog();
+    mocks.requestSerialPort.mockRejectedValue(lapsedPick());
+    await el._flash();
+    await el.updateComplete;
+    expect(card(el).state).toBe("error");
+    expect(card(el).statusMessage).toBe("serial.picker_needs_click");
   });
 
   it("goes back to the setup step when the picker is dismissed, and reports a failed flash", async () => {
