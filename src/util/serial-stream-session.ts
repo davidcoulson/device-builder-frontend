@@ -1,8 +1,8 @@
 /**
  * The transport half of a Web Serial protocol session: the reader and writer
- * locks, a background read loop feeding ``onBytes``, an abort promise raced
- * against every wait (an in-flight stream read or write cannot be
- * interrupted, so the abort has to win the race instead), and a bounded
+ * locks, a background read loop feeding ``onBytes``, the abort told to every
+ * wait that is under way (an in-flight stream read or write cannot be
+ * interrupted, so the wait ends with the abort instead), and a bounded
  * teardown. Engines extend it with their framing.
  *
  * A write is also raced against the device going away: written to a device
@@ -19,11 +19,11 @@ const STREAM_TEARDOWN_TIMEOUT_MS = 2000;
 export abstract class SerialStreamSession {
   private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
   private readonly writer: WritableStreamDefaultWriter<Uint8Array>;
-  // Rejects on abort, never settles otherwise.
-  private readonly aborted: Promise<never>;
-  // Rejects with ``readEnded`` once the session ended, never settles otherwise.
-  private readonly gone: Promise<never>;
-  private markGone: (err: Error) => void = () => {};
+  // What waits on the abort, and what waits on the device: each is told
+  // once and forgotten when its own work settles, so a session that polls
+  // for minutes keeps nothing of the waits behind it.
+  private readonly onAbort = new Set<(reason: unknown) => void>();
+  private readonly onGone = new Set<(reason: unknown) => void>();
   private readonly watch: PortLost;
   private active = true;
   /** Why the session ended (device gone, port error); set before ``onEnded``. */
@@ -38,20 +38,19 @@ export abstract class SerialStreamSession {
     }
     this.reader = port.readable.getReader();
     this.writer = port.writable.getWriter();
-    this.aborted = new Promise<never>((_, reject) => {
-      if (!signal) return;
-      if (signal.aborted) reject(signal.reason);
-      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-    });
-    this.aborted.catch(() => {});
-    this.gone = new Promise<never>((_, reject) => (this.markGone = reject));
-    this.gone.catch(() => {});
+    // A signal that is aborted already has no abort left to tell of; every
+    // wait finds that by itself.
+    if (signal && !signal.aborted) {
+      signal.addEventListener("abort", this.onAborted, { once: true });
+    }
     // The read loop ends by itself when the device goes; the port's own
     // report is for a read that stays pending too.
     this.watch = watchPortLost(port);
     this.watch.gone.catch((err: Error) => this.end(err));
     void this.readLoop();
   }
+
+  private readonly onAborted = (): void => tell(this.onAbort, this.signal?.reason);
 
   /** Bytes as they arrive; runs on the read loop. */
   protected abstract onBytes(bytes: Uint8Array): void;
@@ -60,13 +59,26 @@ export abstract class SerialStreamSession {
   protected onEnded(_err: Error): void {}
 
   protected race<T>(p: Promise<T>): Promise<T> {
-    p.catch(() => {}); // Losing the race must not surface as unhandled.
-    return Promise.race([p, this.aborted]);
+    if (this.signal?.aborted) {
+      p.catch(() => {}); // Losing the race must not surface as unhandled.
+      return Promise.reject(this.signal.reason);
+    }
+    return until(p, this.onAbort);
+  }
+
+  /** ``p``, or the abort, or the reason the session ended once it has. */
+  private untilAbortedOrGone<T>(p: Promise<T>): Promise<T> {
+    const aborted = this.signal?.aborted;
+    if (aborted || this.readEnded) {
+      p.catch(() => {});
+      return Promise.reject(aborted ? this.signal?.reason : this.readEnded);
+    }
+    return until(p, this.onAbort, this.onGone);
   }
 
   protected async writeBytes(bytes: Uint8Array): Promise<void> {
     try {
-      await this.race(Promise.race([this.writer.write(bytes), this.gone]));
+      await this.untilAbortedOrGone(this.writer.write(bytes));
     } catch (err) {
       // The browser can fail the write before the read, or the port, says so.
       const lost = deviceLostFrom(err);
@@ -102,7 +114,7 @@ export abstract class SerialStreamSession {
     // One error for a lost device, however it was noticed.
     const reason = deviceLostFrom(err) ?? err;
     this.readEnded = reason;
-    this.markGone(reason);
+    tell(this.onGone, reason);
     this.onEnded(reason);
   }
 
@@ -116,6 +128,13 @@ export abstract class SerialStreamSession {
   async close(failure?: unknown): Promise<void> {
     this.active = false;
     this.watch.dispose();
+    // A signal that outlives the session keeps nothing of it.
+    this.signal?.removeEventListener("abort", this.onAborted);
+    // No wait outlives the session either: one that is still under way has
+    // nothing left to wait for.
+    const closed = failure ?? new Error("Serial session closed");
+    tell(this.onAbort, closed);
+    tell(this.onGone, closed);
     const writer =
       failure !== undefined ? this.writer.abort(failure) : this.writer.close();
     // Best effort: a dead port rejects these or never settles them.
@@ -124,4 +143,39 @@ export abstract class SerialStreamSession {
     this.reader.releaseLock();
     this.writer.releaseLock();
   }
+}
+
+/**
+ * ``p``, or the reason one of ``waiting`` is told first. The wait is
+ * forgotten by all of them once it is over, whichever way it ended.
+ */
+function until<T>(
+  p: Promise<T>,
+  ...waiting: Set<(reason: unknown) => void>[]
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const forget = () => waiting.forEach((set) => set.delete(told));
+    const told = (reason: unknown) => {
+      forget();
+      reject(reason);
+    };
+    waiting.forEach((set) => set.add(told));
+    // Forgotten as it ends, not after: whoever waited on it runs next, and
+    // finds nothing of it left.
+    p.then(
+      (value) => {
+        forget();
+        resolve(value);
+      },
+      (err: unknown) => {
+        forget();
+        reject(err);
+      }
+    );
+  });
+}
+
+function tell(waiting: Set<(reason: unknown) => void>, reason: unknown): void {
+  for (const reject of [...waiting]) reject(reason);
+  waiting.clear();
 }
