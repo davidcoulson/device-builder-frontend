@@ -3,8 +3,8 @@
  * by tagged extension data. The header block (not main flash) names the
  * board and carries the partition table; every group of data blocks opens
  * with an OTA_PART_INFO tag naming, per OTA scheme, the partition it belongs
- * to. This resolves the UART flasher's scheme (always the first OTA slot, as
- * ltchiptool does) into absolute flash runs.
+ * to. This resolves the scheme a family's UART flasher writes into absolute
+ * flash runs.
  */
 import {
   parseUf2Blocks,
@@ -12,15 +12,8 @@ import {
   UF2_BLOCK_SIZE,
   UF2_FLAG_HAS_TAGS,
   UF2_FLAG_NOT_MAIN_FLASH,
-  Uf2FamilyError,
   type Uf2Range,
-} from "../../util/uf2.js";
-import { XMODEM_BLOCK_SIZE } from "../../util/xmodem.js";
-
-/** Realtek AmebaZ2 (RTL8720C), the family the UART engine can flash. */
-export const UF2_FAMILY_AMBZ2 = 0xe08f7564;
-/** Realtek AmebaZ (RTL8710B): a different ROM protocol, refused up front. */
-export const UF2_FAMILY_AMBZ = 0x22e0d6fc;
+} from "../util/uf2.js";
 
 export const LT_TAG = {
   OTA_FORMAT_2: 0x6c8492,
@@ -45,6 +38,25 @@ export interface LibreTinyImage {
   /** Absolute flash runs in file order, contiguous pages joined. */
   runs: Uf2Range[];
   totalBytes: number;
+}
+
+/**
+ * The scheme of OTA_PART_INFO a flasher writes, as ltchiptool picks it per
+ * family: a chip with one image slot takes the single scheme, one with two
+ * takes the first slot.
+ */
+export type LibreTinyScheme = "flasher-single" | "flasher-ota1";
+
+export interface LibreTinyParseOptions {
+  scheme: LibreTinyScheme;
+  /** What the flasher writes at a time; a run is padded to it in flash. */
+  blockSize: number;
+  /**
+   * Where the blocks lie: from the start of the run (a transfer that begins
+   * at its address), or on the grid of the flash (sectors that are erased
+   * and written whole, so a run is padded at its head as well).
+   */
+  blocksFrom: "run" | "flash";
 }
 
 export interface LibreTinyBlock {
@@ -112,13 +124,13 @@ export function parsePartitionTable(table: Uint8Array): LibreTinyPartition[] {
   return partitions;
 }
 
-/** The partition this block group targets under the flasher's scheme, or null. */
-function partInfoTarget(info: Uint8Array): string | null {
+/** The partition this block group targets under *scheme*, or null. */
+function partInfoTarget(info: Uint8Array, scheme: LibreTinyScheme): string | null {
   if (info.length < 3) throw new Error("Invalid UF2: OTA_PART_INFO too short");
   const names = decoder.decode(info.subarray(3)).split("\0").filter(Boolean);
-  // One nibble per scheme (device single, device OTA1, device OTA2, flasher
-  // single, flasher OTA1, flasher OTA2); the UART flasher writes the OTA1 layout.
-  const index = info[2] >> 4;
+  // One nibble per scheme: device single, device OTA1, device OTA2, flasher
+  // single, flasher OTA1, flasher OTA2.
+  const index = scheme === "flasher-single" ? info[1] & 0x0f : info[2] >> 4;
   if (index === 0) return null;
   const name = names[index - 1];
   if (!name) throw new Error("Invalid UF2: OTA_PART_INFO names too few partitions");
@@ -126,13 +138,14 @@ function partInfoTarget(info: Uint8Array): string | null {
 }
 
 /**
- * Parse a LibreTiny UF2 for the UART flasher. The family must be one of
+ * Parse a LibreTiny UF2 for a UART flasher. The family must be one of
  * ``allowedFamilies`` (a ``Uf2FamilyError`` names the one refused); the
  * file must carry its partition table, which every LibreTiny build does.
  */
 export function parseLibreTinyImage(
   bytes: Uint8Array,
-  allowedFamilies: readonly number[]
+  allowedFamilies: readonly number[],
+  { scheme, blockSize, blocksFrom }: LibreTinyParseOptions
 ): LibreTinyImage {
   const blocks = parseLibreTinyBlocks(bytes);
   const familyId = requireUf2Family(blocks, allowedFamilies);
@@ -168,7 +181,7 @@ export function parseLibreTinyImage(
     const info = b.tags.get(LT_TAG.OTA_PART_INFO);
     if (info) {
       grouped = true;
-      const name = partInfoTarget(info);
+      const name = partInfoTarget(info, scheme);
       part = name ? (partitions.find((p) => p.name === name) ?? null) : null;
       if (name && !part) throw new Error(`Invalid UF2: partition '${name}' not in table`);
     }
@@ -195,14 +208,18 @@ export function parseLibreTinyImage(
     run.cursor += b.data.length;
   }
   if (runs.length === 0) throw new Error("Invalid UF2: nothing to flash");
-  // The UART flasher sends whole XModem blocks, so a run's tail padding
-  // lands in flash too: it must not reach into the next partition, nor into
-  // another run of the same partition (that run was written and verified
-  // first, and would be overwritten).
-  const paddedEnd = (r: { address: number; bytes: number[] }) =>
-    r.address + Math.ceil(r.bytes.length / XMODEM_BLOCK_SIZE) * XMODEM_BLOCK_SIZE;
+  // The flasher writes whole blocks, so a run's padding lands in flash too:
+  // it must not reach into another partition, nor into another run of the
+  // same partition (that run would be overwritten, or erased).
+  const up = (n: number) => Math.ceil(n / blockSize) * blockSize;
+  const written = (r: { address: number; bytes: number[] }) => {
+    const start =
+      blocksFrom === "flash" ? r.address - (r.address % blockSize) : r.address;
+    return { start, end: start + up(r.address - start + r.bytes.length) };
+  };
   for (const r of runs) {
-    if (paddedEnd(r) > r.part.offset + r.part.length) {
+    const { start, end } = written(r);
+    if (start < r.part.offset || end > r.part.offset + r.part.length) {
       throw new Error(
         `Invalid UF2: run at 0x${r.address.toString(16)} pads past '${r.part.name}'`
       );
@@ -212,7 +229,7 @@ export function parseLibreTinyImage(
   for (let i = 1; i < ordered.length; i++) {
     const prev = ordered[i - 1];
     const next = ordered[i];
-    if (prev.part === next.part && paddedEnd(prev) > next.address) {
+    if (prev.part === next.part && written(prev).end > written(next).start) {
       throw new Error(
         `Invalid UF2: runs at 0x${prev.address.toString(16)} and 0x${next.address.toString(16)} overlap in '${prev.part.name}'`
       );
@@ -228,33 +245,4 @@ export function parseLibreTinyImage(
     runs: ranges,
     totalBytes: ranges.reduce((n, r) => n + r.data.length, 0),
   };
-}
-
-/** Why an AmebaZ2 image was refused; ``key`` is the install dialogs' title copy. */
-export class Ambz2ImageError extends Error {
-  constructor(
-    readonly key: "firmware.rtl_wrong_family" | "firmware.rtl_bad_uf2",
-    readonly cause: unknown
-  ) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.name = "Ambz2ImageError";
-  }
-}
-
-/**
- * Parse a LibreTiny UF2 for the RTL8720C flasher. Another Realtek family
- * (AmebaZ) is a real build for a chip the browser cannot flash; anything
- * else is a bad file. Fails as ``Ambz2ImageError``.
- */
-export function parseAmbz2Image(bytes: Uint8Array): LibreTinyImage {
-  try {
-    return parseLibreTinyImage(bytes, [UF2_FAMILY_AMBZ2]);
-  } catch (err) {
-    throw new Ambz2ImageError(
-      err instanceof Uf2FamilyError
-        ? "firmware.rtl_wrong_family"
-        : "firmware.rtl_bad_uf2",
-      err
-    );
-  }
 }
