@@ -48,7 +48,7 @@ import { overlayBoardLockedPresets } from "../../util/featured-locks.js";
 import { fireEvent } from "../../util/fire-event.js";
 import { hasMaterialValue } from "../../util/material-value.js";
 import { getIn, isPrimitiveOrNullish } from "../../util/nested-values.js";
-import { parseBoardGpio } from "../../util/pin/gpio.js";
+import { findOptionValue } from "../../util/option-match.js";
 import {
   fetchPinRegistryModes,
   getCachedPinRegistryModes,
@@ -789,46 +789,24 @@ export class ESPHomeConfigEntryForm extends LitElement {
       // A select holding the raw value as its own spelling never re-syncs,
       // so a late-mounting option list must always include the value's
       // option (the lazy id-reference list keeps the selected one mounted).
-      if (this._showsValue(current, raw)) continue;
+      if (current === raw || findOptionValue(value, [current]) !== null) continue;
       // wa-select filters its `value` against the exact string of an
-      // option's `value`; case mismatches between YAML and catalog
-      // would silently drop the value. Look up the matching option
-      // case-insensitively and feed wa-select the option's verbatim
-      // value so the lookup succeeds.
-      //
-      // Pin entries are a second mismatch: the seeded YAML value is
-      // a bare int (`9`, from `seedBoardPinDefaults` reading the
-      // board manifest's pin features) or a board spelling (`"P0.27"`,
-      // `"PB03"`) that differs from the option's. Normalise both sides
-      // through the shared pin parser so a freshly seeded i2c bus lands
-      // on the right option instead of showing an empty select.
-      const desired = this._matchOptionValue(select, raw);
+      // option's `value`; a case or bare-decimal mismatch between YAML and
+      // catalog would silently drop the value. Look up the matching option
+      // and feed wa-select the option's verbatim value so the lookup succeeds.
+      const desired = this._matchOptionValue(select, value) ?? raw;
       if (current !== desired) {
         select.value = desired;
       }
     }
   }
 
-  /** Whether a select's value is the raw value or its option spelling. */
-  private _showsValue(current: string, raw: string): boolean {
-    if (current === raw) return true;
-    if (!current || !raw) return false;
-    if (current.toLowerCase() === raw.toLowerCase()) return true;
-    const gpio = parseBoardGpio(raw);
-    return gpio !== null && parseBoardGpio(current) === gpio;
-  }
-
-  private _matchOptionValue(select: HTMLElement, raw: string): string {
-    if (!raw) return raw;
+  private _matchOptionValue(select: HTMLElement, value: unknown): string | null {
     const options = Array.from(
-      select.querySelectorAll<HTMLElement & { value: string }>("wa-option")
+      select.querySelectorAll<HTMLElement & { value: string }>("wa-option"),
+      (o) => o.value ?? ""
     );
-    const lower = raw.toLowerCase();
-    const exact = options.find((o) => o.value?.toLowerCase() === lower);
-    if (exact) return exact.value;
-    const gpio = parseBoardGpio(raw);
-    if (gpio === null) return raw;
-    return options.find((o) => parseBoardGpio(o.value) === gpio)?.value ?? raw;
+    return findOptionValue(value, options);
   }
 
   /**
