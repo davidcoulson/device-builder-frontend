@@ -207,7 +207,7 @@ describe("flashBeken, when it cannot go on", () => {
     await expect(done).rejects.toBeInstanceOf(BekenResponseError);
   });
 
-  it("fails after four tries when a sector's CRC never matches", async () => {
+  it("fails after eleven tries when a sector's CRC never matches", async () => {
     const { chip, log, done } = flash(BK7231T, referenceImage(FAMILY.t), {
       badCrcs: 100,
     });
@@ -218,8 +218,8 @@ describe("flashBeken, when it cannot go on", () => {
 
     expect(
       log.filter((l) => l === "Writing 0x11000 failed, erasing and writing again")
-    ).toHaveLength(3);
-    expect(count(chip, 0x07, true)).toBe(4);
+    ).toHaveLength(10);
+    expect(count(chip, 0x07, true)).toBe(11);
     expect(last(chip.sent())?.[4]).not.toBe(0x0e);
   });
 

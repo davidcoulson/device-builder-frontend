@@ -7,18 +7,23 @@
  * DOM.
  */
 import { formatAddress, tenthLogger } from "../../util/flash-log.js";
+import { sleep } from "../../util/sleep.js";
 import { settledWithin } from "../../util/with-deadline.js";
 import type { LibreTinyFlashHooks } from "../libretiny-flash.js";
 import type { LibreTinyImage } from "../libretiny-uf2.js";
 import { type BekenChip, familyOf } from "./beken-chips.js";
-import { BekenLink, releaseLines, resetOverLines } from "./beken-link.js";
+import {
+  BEKEN_BAUD_RATE,
+  BekenLink,
+  releaseLines,
+  resetOverLines,
+} from "./beken-link.js";
 import { reboot } from "./beken-packets.js";
 import { type BekenChipInfo, BekenSession } from "./beken-session.js";
 
 export { BekenResponseError } from "./beken-link.js";
 export { BekenUnknownFlashError } from "./beken-session.js";
 
-const BEKEN_BAUD_RATE = 115200;
 /** How long each try gets to produce a linked downloader. */
 const AUTO_LINK_MS = 2000;
 /**
@@ -31,6 +36,12 @@ const AUTO_RESET_ATTEMPTS = 3;
 const RESET_WAIT_MS = 5 * 60 * 1000;
 /** How long the close after a flash gets. */
 const TEARDOWN_MS = 2000;
+/**
+ * How long the reboot is given to leave before the port closes. A write
+ * resolves once the browser has the bytes, and a bridge without
+ * backpressure loses what is still in flight when the port closes.
+ */
+const REBOOT_DRAIN_MS = 100;
 /** ``onWaiting``: nothing answered; the user has to reset the chip while this keeps polling. */
 export type BekenFlashHooks = LibreTinyFlashHooks;
 
@@ -137,6 +148,7 @@ export async function flashBeken(
     }
     // No response comes back; the chip boots the firmware.
     await link.command(reboot());
+    await sleep(REBOOT_DRAIN_MS);
     log("Rebooting into the firmware");
     hooks.onProgress(100);
   } catch (err) {
