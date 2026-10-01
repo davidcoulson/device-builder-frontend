@@ -119,6 +119,49 @@ describe("flashBeken", () => {
     expect(chip.statusRegister()).toBe(0);
   });
 
+  it("erases a blank sector again when its CRC shows the erase did not take", async () => {
+    const image = referenceImage(FAMILY.n);
+    const { chip, log, done } = flash(BK7231N, image, {
+      ignoredErases: { address: 0x12000, times: 1 },
+    });
+
+    await driveFakeTimers(done);
+
+    expectImage(chip, image);
+    expect(log).toContain("Erasing 0x12000 failed, erasing again");
+  });
+
+  it("checks a blank first sector once, with the CRC of the first erase", async () => {
+    const data = new Uint8Array(2 * 0x1000).fill(0xff);
+    data.fill(0x5a, 0x1000);
+    const image = { ...referenceImage(FAMILY.n), runs: [{ address: 0x11000, data }] };
+    const { chip, done } = flash(BK7231N, image);
+
+    await driveFakeTimers(done);
+
+    expectImage(chip, image);
+    // Before the erase and after it; the after one is also the blank check.
+    const crcsOfFirst = chip
+      .sent()
+      .filter(
+        (f) =>
+          isCommand(f, 0x10, false) && f[5] === 0x00 && f[6] === 0x10 && f[7] === 0x21
+      );
+    expect(crcsOfFirst).toHaveLength(2);
+  });
+
+  it("does not check a blank sector under a bootloader's protocol", async () => {
+    const image = referenceImage(FAMILY.t);
+    const { chip, log, done } = flash(BK7231T, image, {
+      ignoredErases: { address: 0x12000, times: 1 },
+    });
+
+    await driveFakeTimers(done);
+
+    expect(log.some((l) => l.endsWith("failed, erasing again"))).toBe(false);
+    expect(chip.flash[0x12000]).toBe(oldByte(0x12000));
+  });
+
   it("tries an erase again when the BootROM says it failed", async () => {
     const image = referenceImage(FAMILY.n);
     const { chip, log, done } = flash(BK7231N, image, { failedEraseStatus: 1 });
