@@ -231,6 +231,13 @@ export class BekenSession {
     this.bypass = false;
     try {
       const first = await this.readSector(PROBE_ADDRESS);
+      // A sector of one byte value matches itself at every size.
+      if (first.every((b) => b === first[0])) {
+        throw new BekenResponseError(
+          `Could not tell the size of the flash: the sector at ${formatAddress(PROBE_ADDRESS)} is blank, ` +
+            "so there is nothing to compare. Flash the chip once with ltchiptool, then install again."
+        );
+      }
       for (const size of FLASH_SIZES) {
         const again = await this.readSector(size + PROBE_ADDRESS);
         if (first.every((b, i) => b === again[i])) return size;
