@@ -16,6 +16,7 @@
  * change; every optional field below is additive in v1 and means what v1
  * did when absent.
  */
+import type { ConfiguredDevice } from "../api/types/devices.js";
 import type { FirmwareBinary } from "../api/types/firmware-jobs.js";
 
 export const PROTOCOL_VERSION = 1;
@@ -71,6 +72,8 @@ export interface HandoffSpec {
    * tab is offered.
    */
   check?: (bytes: Uint8Array) => Promise<{ key: string; detail: string } | null>;
+  /** Where the device's serial logs are, for the receiver; absent when not known. */
+  logs?: (device: ConfiguredDevice | null) => HandoffLogs | undefined;
 }
 
 /**
@@ -111,8 +114,13 @@ export interface FirmwareMessage {
    * 0, which the receiver parses itself.
    */
   flasher?: HandoffFlasher;
+  /** Where the device's serial logs are, when the opener knows; absent: elsewhere or unknown. */
+  logs?: HandoffLogs;
   parts: FlashPartMessage[];
 }
+
+/** ``"flash-port"``: on the port the flash goes over; ``"off"``: the device has none. */
+export type HandoffLogs = "flash-port" | "off";
 
 export type FlashState = "connecting" | "installing" | "done" | "error";
 

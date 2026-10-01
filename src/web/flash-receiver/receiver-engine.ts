@@ -1,7 +1,7 @@
 import type { LocalizeFunc } from "../../common/localize.js";
 import type { SerialLogsPolicy } from "../../platforms/serial-logs.js";
 import type { FlashPart } from "../platforms/esp/firmware-build.js";
-import type { FlashState, HandoffFlasher } from "./protocol.js";
+import type { FlashState, HandoffFlasher, HandoffLogs } from "./protocol.js";
 
 export interface ReceiverRunHooks {
   /** A state the opener mirrors, with the line the receiver shows for it. */
@@ -95,7 +95,9 @@ export interface ReceiverEngine {
   prepare(
     parts: FlashPart[],
     erase: boolean,
-    localize: LocalizeFunc
+    localize: LocalizeFunc,
+    /** Where the opener says the device's serial logs are. */
+    logs?: HandoffLogs
   ): Promise<ReceiverPlan | { error: string; retryable?: boolean }>;
 }
 

@@ -3,7 +3,7 @@ import type { SerialLogsPolicy } from "../../platforms/serial-logs.js";
 import { getErrorMessage } from "../../util/error-message.js";
 import { type Prepared, TOOLS_LOAD_FAILED } from "../install/preparation.js";
 import type { FlashPart } from "../platforms/esp/firmware-build.js";
-import type { HandoffFlasher } from "./protocol.js";
+import type { HandoffFlasher, HandoffLogs } from "./protocol.js";
 import {
   RECEIVER_ENGINES,
   type ReceiverEngine,
@@ -15,6 +15,7 @@ export interface ReceiverInput {
   parts: FlashPart[];
   erase: boolean;
   flasher: HandoffFlasher;
+  logs?: HandoffLogs;
 }
 
 /** A checked image: its plan, and the logs policy of the flasher that runs it. */
@@ -41,7 +42,7 @@ export async function prepareForReceiver(
     return { failure: localize(TOOLS_LOAD_FAILED), retryable: true };
   }
   try {
-    const plan = await engine.prepare(input.parts, input.erase, localize);
+    const plan = await engine.prepare(input.parts, input.erase, localize, input.logs);
     if ("error" in plan) {
       return { failure: plan.error, retryable: plan.retryable === true };
     }

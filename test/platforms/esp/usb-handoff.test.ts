@@ -119,6 +119,29 @@ describe("handOffToFlasher", () => {
     expect(host._flashPercent).toBe(10);
   });
 
+  it.each([
+    { logger: "UART1", baud: null, sent: "flash-port" },
+    { logger: null, baud: null, sent: undefined },
+    { logger: "UART1", baud: 0, sent: "off" },
+  ])(
+    "says where the BK72xx logs are: $logger at baud $baud is $sent",
+    ({ logger, baud, sent }) => {
+      const host = makeHost();
+      host._device = {
+        ...host._device,
+        target_platform: "bk72xx",
+        mcu: "bk7238",
+        logger_interface: logger,
+        logger_baud_rate: baud,
+      } as typeof host._device;
+      handOffToFlasher(asHost(host));
+      expect(openFlasher.mock.calls[0][3]).toMatchObject({
+        flasher: "bk-uart",
+        logs: sent,
+      });
+    }
+  );
+
   it("hands a Pico's UF2 to the PICOBOOT flasher, without erase", () => {
     const host = makeHost();
     host._device.target_platform = "rp2040";
