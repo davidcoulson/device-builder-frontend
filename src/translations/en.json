@@ -596,6 +596,7 @@
     "ln_guide_link": "LibreTiny flashing guide for the LN882H",
     "ln_flash_failed": "UART flash failed",
     "ln_done_manual_reset": "Installation complete. Release BOOT and reset the chip to start the firmware.",
+    "ln_done_logs_on_uart1": "Installation complete. The logs come out on UART1 (TX1 on PB9), not on the port used to install; read them there.",
     "ln_bad_uf2": "Invalid LibreTiny UF2 image",
     "ln_wrong_family": "This firmware is not built for a Lightning LN882H chip.",
     "ln_ramcode_unavailable": "Could not download the LN882H loader the chip needs for flashing. Check the internet connection and try again.",
@@ -1945,6 +1946,7 @@
       "mode_nrf": "nRF52",
       "mode_rtl": "RTL8720C",
       "mode_bk": "BK72xx",
+      "mode_ln": "LN882H",
       "mode_picker_label": "Device family",
       "more_options": "More options",
       "report_issue": "Report an issue"
@@ -2080,7 +2082,8 @@
       "get_esphome": "Get ESPHome",
       "body_nrf": "ESPHome Web lets you update the firmware on your nRF52 device using the Nordic DFU protocol, directly from your browser.",
       "body_rtl": "ESPHome Web lets you install a LibreTiny build on your RTL8720C (AmebaZ2) board through its USB serial adapter and check the device logs, directly from your browser.",
-      "body_bk": "ESPHome Web lets you install your ESPHome build on a Beken BK72xx device through a USB serial adapter and check the device logs, directly from your browser."
+      "body_bk": "ESPHome Web lets you install your ESPHome build on a Beken BK72xx device through a USB serial adapter and check the device logs, directly from your browser.",
+      "body_ln": "ESPHome Web lets you install your ESPHome build on a Lightning LN882H device through a USB serial adapter and check the device logs, directly from your browser."
     },
     "install": {
       "preparing": "Preparing firmware…",
@@ -2115,6 +2118,14 @@
       "install_title": "Install firmware on a BK72xx",
       "install_intro": "There is no ready-made ESPHome Web firmware for the BK72xx yet. Build your device in the ESPHome Device Builder and install its UF2 from here.",
       "logs_elsewhere": "With serial logging on, the logs come out on UART2, the pad marked TX2, unless the logger is set to UART1, the port used to install. To read them on this port, move the logger to UART1 in the configuration."
+    },
+    "ln": {
+      "title": "LN882H Device",
+      "connect_hint": "Install the UF2 of your ESPHome build on your Lightning LN882H device through a USB serial adapter, or read its logs. To install, wire adapter RX to TX0 (PA2) and adapter TX to RX0 (PA3), and connect BOOT (GPIOA9) to GND before the board powers up. The logs come out on UART1 (TX1 on PB9) by default; move adapter RX there for them, or leave it on TX0 if the logger is set to UART0.",
+      "logs": "Serial logs",
+      "install_title": "Install firmware on an LN882H",
+      "install_intro": "There is no ready-made ESPHome Web firmware for the LN882H yet. Build your device in the ESPHome Device Builder and install its UF2 from here.",
+      "logs_elsewhere": "With serial logging on, the logs come out on UART1, TX1 on PB9, by default; read them there. If the logger is set to UART0, they come out on TX0 (PA2), the port used to install."
     },
     "rtl": {
       "title": "RTL8720C Device",

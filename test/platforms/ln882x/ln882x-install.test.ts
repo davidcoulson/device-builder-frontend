@@ -38,6 +38,7 @@ vi.mock("../../../src/platforms/ln882x/index.js", async (importOriginal) => {
   return { ...real, loadLn882xImage: seams.loadLn882xImage };
 });
 
+import { argsLocalize } from "../../_dom.js";
 import {
   ltHeaderTags,
   ltPartInfoTags,
@@ -104,6 +105,12 @@ function makeHost(opts: { binaries?: FirmwareBinary[]; uf2?: ArrayBuffer } = {})
   );
 }
 type Host = ReturnType<typeof makeHost>;
+
+/** The device, its logger moved by its config. */
+const logging = (
+  logger_interface: string | null,
+  logger_baud_rate: number | null = null
+): ConfiguredDevice => ({ ...device, logger_interface, logger_baud_rate });
 
 function readyHost(): Host {
   const host = makeHost();
@@ -295,10 +302,70 @@ describe("lnDoFlash", () => {
     ]);
     expect(host._log.lines).toContain("Writing 0x7000 (256 bytes)");
     expect(host._step).toBe("done");
-    expect(host._statusMessage).toBe("firmware.status_done");
+    expect(host._statusMessage).toBe("firmware.ln_done_logs_on_uart1");
     expect(host._flashAbort).toBeNull();
-    // The logs stay on the server's serial port for now.
+    // The flash went over UART0; the logs are on UART1 by default.
     expect(host._logsPort).toBeNull();
+  });
+
+  it("opens the logs on the flashed port when the config puts them on UART0", async () => {
+    const host = readyHost();
+    host._device = logging("UART0");
+    host._showLogsAfterInstall = true;
+    const port = {};
+    mocks.requestSerialPort.mockResolvedValue(port);
+    mocks.flashLn882x.mockResolvedValue(true);
+
+    await lnDoFlash(asHost(host));
+
+    expect(host._statusMessage).toBe("firmware.status_done");
+    expect(host._logsPort).toBe(port);
+    expect(mocks.dispatchShowLogsAfterInstall).toHaveBeenCalledWith(
+      host,
+      expect.objectContaining({ webSerialPort: port, targetPlatform: "ln882x" })
+    );
+    expect(host._open).toBe(false);
+  });
+
+  it("keeps the UART0 port for Show logs without opening them unasked", async () => {
+    const host = readyHost();
+    host._device = logging("UART0");
+    const port = {};
+    mocks.requestSerialPort.mockResolvedValue(port);
+    mocks.flashLn882x.mockResolvedValue(true);
+
+    await lnDoFlash(asHost(host));
+
+    expect(host._step).toBe("done");
+    expect(host._logsPort).toBe(port);
+    expect(mocks.dispatchShowLogsAfterInstall).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      why: "an explicit UART1",
+      device: logging("UART1"),
+      message: "firmware.ln_done_logs_on_uart1",
+    },
+    {
+      why: "a disabled logger",
+      device: logging("UART0", 0),
+      message: "firmware.status_done",
+    },
+  ])("keeps no port for $why", async ({ device: config, message }) => {
+    const host = readyHost();
+    host._localize = argsLocalize;
+    host._device = config;
+    host._showLogsAfterInstall = true;
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashLn882x.mockResolvedValue(true);
+
+    await lnDoFlash(asHost(host));
+
+    expect(host._step).toBe("done");
+    expect(host._statusMessage).toBe(message);
+    expect(host._logsPort).toBeNull();
+    expect(mocks.dispatchShowLogsAfterInstall).not.toHaveBeenCalled();
   });
 
   it("drops what the engine reports once the dialog moved on", async () => {
@@ -356,17 +423,33 @@ describe("lnDoFlash", () => {
     expect(host._errorMessage).toBe("The chip refused the start address 0x7000");
   });
 
-  it("asks for a reset by hand when the chip was not rebooted", async () => {
+  it("asks for a reset by hand when the chip was not rebooted, keeping the UART0 port for Show logs", async () => {
     const host = readyHost();
+    host._device = logging("UART0");
     host._showLogsAfterInstall = true;
-    mocks.requestSerialPort.mockResolvedValue({});
+    const port = {};
+    mocks.requestSerialPort.mockResolvedValue(port);
     mocks.flashLn882x.mockResolvedValue(false);
 
     await lnDoFlash(asHost(host));
 
     expect(host._step).toBe("done");
     expect(host._statusMessage).toBe("firmware.ln_done_manual_reset");
+    // Not opened before the reset, but there for Show logs after it.
+    expect(host._logsPort).toBe(port);
     expect(mocks.dispatchShowLogsAfterInstall).not.toHaveBeenCalled();
+  });
+
+  it("keeps no port after a manual reset when the logs are elsewhere", async () => {
+    const host = readyHost();
+    host._device = logging(null);
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashLn882x.mockResolvedValue(false);
+
+    await lnDoFlash(asHost(host));
+
+    expect(host._statusMessage).toBe("firmware.ln_done_manual_reset");
+    expect(host._logsPort).toBeNull();
   });
 
   it("names a board that was unplugged during the flash", async () => {
@@ -411,8 +494,32 @@ describe("lnDoFlash", () => {
 });
 
 describe("ln882xInstall", () => {
-  it("has no hand-off to web.esphome.io yet", () => {
-    expect(ln882xInstall.handoff).toBeUndefined();
+  it("hands its UF2 to web.esphome.io's LN882H flasher, checked as the in-app flow checks it", async () => {
+    const handoff = ln882xInstall.handoff!;
+
+    expect(handoff).toMatchObject({
+      flasher: "ln-uart",
+      erase: false,
+      noArtifactKey: "firmware.no_uf2",
+    });
+    expect(
+      handoff.pick([bin("firmware.bin", "bin"), bin("firmware.uf2", "uf2")], "ln882x")
+        ?.file
+    ).toBe("firmware.uf2");
+    expect(await handoff.check!(new Uint8Array(uf2()))).toBeNull();
+    expect(await handoff.check!(new Uint8Array(uf2(AMBZ2)))).toMatchObject({
+      key: "firmware.ln_wrong_family",
+    });
+  });
+
+  it.each([
+    { why: "logs on UART0", config: { logger_interface: "UART0" }, logs: "flash-port" },
+    { why: "the default UART1", config: { logger_interface: null }, logs: undefined },
+    { why: "a disabled logger", config: { logger_baud_rate: 0 }, logs: "off" },
+  ])("tells the receiver where the logs are for $why", ({ config, logs }) => {
+    expect(
+      ln882xInstall.handoff!.logs!({ ...device, logger_baud_rate: null, ...config })
+    ).toBe(logs);
   });
 
   it("goes back to the ready step as the Retry target", () => {
@@ -449,7 +556,13 @@ describe("ln882xInstall", () => {
 });
 
 describe("ln882xInstall.holdsPort", () => {
-  it("keeps no port: the logs stay on the server's serial port", () => {
-    expect(ln882xInstall.holdsPort(device)).toBe(false);
+  it.each([
+    { why: "logs on UART0", config: logging("UART0"), holds: true },
+    { why: "the default UART1", config: logging(null), holds: false },
+    { why: "an explicit UART1", config: logging("UART1"), holds: false },
+    { why: "a disabled logger", config: logging("UART0", 0), holds: false },
+    { why: "no device", config: null, holds: false },
+  ])("is $holds for $why", ({ config, holds }) => {
+    expect(ln882xInstall.holdsPort(config)).toBe(holds);
   });
 });
