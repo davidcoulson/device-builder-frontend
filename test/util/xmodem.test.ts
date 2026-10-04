@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { fakeReceiver } from "./_fake-modem-receiver.js";
+
 import {
   crc16Xmodem,
   XMODEM_BLOCK_SIZE,
@@ -12,21 +14,6 @@ const EOT = 0x04;
 const ACK = 0x06;
 const NAK = 0x15;
 const CAN = 0x18;
-
-/** Scripted receiver: hands out ``replies`` one byte per read, null once exhausted. */
-function fakeReceiver(replies: number[]) {
-  const writes: Uint8Array[] = [];
-  const queue = [...replies];
-  return {
-    writes,
-    io: {
-      write: async (data: Uint8Array) => {
-        writes.push(data);
-      },
-      readByte: async () => queue.shift() ?? null,
-    },
-  };
-}
 
 const bytes = (n: number, fill = 0x5a) => new Uint8Array(n).fill(fill);
 
@@ -76,6 +63,22 @@ describe("xmodemSend", () => {
     const stubborn = fakeReceiver([NAK, NAK, NAK, NAK]);
     await expect(xmodemSend(stubborn.io, bytes(4), { retries: 2 })).rejects.toThrow(
       /not acknowledged after 2 retries/
+    );
+  });
+
+  it("skips a stray byte before the reply instead of sending the block again", async () => {
+    // Line noise or a receiver's repeated 'C' between a block and its ACK,
+    // as ltchiptool's sender skips it.
+    const rx = fakeReceiver([NAK, 0x43, 0x00, ACK, ACK]);
+    await xmodemSend(rx.io, bytes(4));
+    expect(rx.writes).toHaveLength(2);
+    expect(rx.writes[1]).toEqual(new Uint8Array([EOT]));
+  });
+
+  it("stops on a cancel at the end of the file", async () => {
+    const rx = fakeReceiver([NAK, ACK, CAN]);
+    await expect(xmodemSend(rx.io, bytes(4))).rejects.toThrow(
+      "Receiver cancelled at the end of the file"
     );
   });
 
