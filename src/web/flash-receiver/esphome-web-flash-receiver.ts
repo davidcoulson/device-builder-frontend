@@ -17,6 +17,7 @@ import "../dashboard/esphome-web-unsupported-card.js";
 import { cardActionsRowStyles } from "../dashboard/card-actions-row.js";
 import { Preparation } from "../install/preparation.js";
 import { openPortForLogs } from "../logs/open-port-for-logs.js";
+import { LOG_BAUD_RATE } from "../logs/serial-source.js";
 import { acquireBootLogs } from "./boot-logs.js";
 import { flashReceiverStyles } from "./esphome-web-flash-receiver.styles.js";
 import { FlashHandshake, parseFlasherParams } from "./flash-handshake.js";
@@ -25,6 +26,7 @@ import {
   type FirmwareMessage,
   type FlashState,
   HANDOFF_FLASHERS,
+  handoffLogBaudRateOf,
   handoffLogsOf,
 } from "./protocol.js";
 import {
@@ -89,9 +91,11 @@ export class ESPHomeWebFlashReceiver extends LitElement {
     (error) => this._onPrepared(error),
     getErrorMessage
   );
-  // The logs policy of the flasher that was last prepared. It outlives the
-  // preparation, for the logs of a flash that is already done.
+  // The logs policy of the flasher that was last prepared, and the baud its
+  // device logs at. They outlive the preparation, for the logs of a flash
+  // that is already done.
   private _logsPolicy: SerialLogsPolicy = ESP_SERIAL_LOGS;
+  _logBaudRate = LOG_BAUD_RATE;
 
   @query("input[type=file]") private _fileInput?: HTMLInputElement;
 
@@ -196,6 +200,7 @@ export class ESPHomeWebFlashReceiver extends LitElement {
       erase: msg.erase !== false,
       flasher: msg.flasher ?? DEFAULT_HANDOFF_FLASHER,
       logs: handoffLogsOf(msg.logs),
+      baudRate: handoffLogBaudRateOf(msg.logBaudRate),
     });
   }
 
@@ -206,7 +211,11 @@ export class ESPHomeWebFlashReceiver extends LitElement {
     if (this._fileInput && this._preparation.state.kind === "idle") {
       this._fileInput.value = "";
     }
-    if (this._plan) this._logsPolicy = this._plan.logs;
+    if (this._plan) {
+      this._logsPolicy = this._plan.logs;
+      // A picked file, or an opener that did not say: ESPHome's default.
+      this._logBaudRate = this._plan.baudRate ?? LOG_BAUD_RATE;
+    }
     if (error !== null) this._setState("error", error);
     else if (this._firmware) this._setState("connecting", this._readyMessage());
     else this._resetForRetry();
@@ -385,7 +394,10 @@ export class ESPHomeWebFlashReceiver extends LitElement {
     const port = this._logPort;
     if (!port) return;
     const gen = this._bootLogsGen;
-    if (!(await openPortForLogs(port, this._localize, this._logsPolicy))) return;
+    if (
+      !(await openPortForLogs(port, this._localize, this._logsPolicy, this._logBaudRate))
+    )
+      return;
     // A flash started (or the receiver unmounted) during the reopen: the
     // dialog must not cover the new install, and the handle just opened
     // would otherwise be orphaned open for the tab's lifetime.
@@ -548,6 +560,7 @@ export class ESPHomeWebFlashReceiver extends LitElement {
         ?open=${this._logsOpen}
         .deviceLabel=${this._deviceName ?? this._localize("web.flash.title")}
         .policy=${this._logsPolicy}
+        .baudRate=${this._logBaudRate}
         @port-replaced=${(e: CustomEvent<SerialPort>) => {
           this._logPort = e.detail;
         }}

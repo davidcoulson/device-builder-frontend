@@ -1,5 +1,6 @@
 import type { SerialPlatformReset } from "../../platforms/serial-logs.js";
 import { releaseLinesAfterReopen } from "../../platforms/serial-reopen.js";
+import { LOG_BAUD_RATE } from "../../util/log-baud-rate.js";
 import { pulseRts } from "../../util/serial-control-lines.js";
 /**
  * Web Serial as a log source. The parent opened the port (``openPortForLogs``)
@@ -12,9 +13,9 @@ import { sleep } from "../../util/sleep.js";
 import type { WebLogSource } from "./log-source.js";
 
 // ESPHome logs over UART default to 115200 baud. The dashboard resolves a
-// per-device override from config; ESPHome Web has no device config, so the
-// default is all that applies.
-export const LOG_BAUD_RATE = 115200;
+// per-device override from config; ESPHome Web has none of its own, so the
+// default applies unless a hand-off says otherwise.
+export { LOG_BAUD_RATE } from "../../util/log-baud-rate.js";
 
 // 8k buffer (vs Chrome's 255-byte default) so a burst of boot logs in a
 // throttled/backgrounded tab doesn't overrun: matches the legacy site.
@@ -27,6 +28,8 @@ export interface SerialLogSourceOptions {
   releaseLinesAfterOpen?: boolean;
   /** A reacquired handle after a re-enumeration; the parent card adopts it. */
   onPortReplaced?: (port: SerialPort) => void;
+  /** The baud a reopen uses; the device's own when its installer knew it. */
+  baudRate?: number;
 }
 
 export class SerialLogSource implements WebLogSource {
@@ -84,7 +87,7 @@ export class SerialLogSource implements WebLogSource {
       console.error("[Web Serial] Failed to close the dead logs port:", err);
     });
     const live = await openLiveSerialPort(dead, {
-      baudRate: LOG_BAUD_RATE,
+      baudRate: this.options.baudRate ?? LOG_BAUD_RATE,
       bufferSize: LOG_BUFFER_SIZE,
       cancelled,
     });

@@ -80,3 +80,17 @@ describe("SerialLogSource reopen line policy", () => {
     });
   });
 });
+
+describe("SerialLogSource reopen baud", () => {
+  it.each([
+    { given: 9600, reopened: 9600 },
+    { given: undefined, reopened: 115200 },
+  ])("reopens at $reopened when given $given", async ({ given, reopened }) => {
+    const { dead } = ports();
+    const source = new SerialLogSource(dead, { reset: "rts-pulse", baudRate: given });
+    await source.resume(hooks, () => false);
+    expect(mocks.openLiveSerialPort.mock.calls[0][1]).toMatchObject({
+      baudRate: reopened,
+    });
+  });
+});
