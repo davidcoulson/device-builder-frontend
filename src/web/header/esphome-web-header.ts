@@ -11,6 +11,7 @@ import { DEFAULT_WEB_MODE, WEB_PLATFORMS } from "../platforms/registry.js";
 import { modeUrl, type WebMode } from "../web-mode.js";
 
 import "./esphome-web-header-actions.js";
+import "./esphome-web-mode-picker.js";
 
 /**
  * ESPHome Web top bar. The device-family picker on the right is hidden
@@ -48,26 +49,24 @@ export class ESPHomeWebHeader extends LitElement {
           !this.minimal && isWebSerialSupported()
             ? html`
                 <div
-                  class="mode-picker"
+                  class="mode-buttons"
                   role="group"
                   aria-label=${this._localize("web.header.mode_picker_label")}
                 >
-                  ${WEB_PLATFORMS.map(({ mode, logo, labelKey }) => {
-                    const label = this._localize(labelKey);
-                    // Below 870px the label is display:none, so the button needs its own name.
-                    return html`
+                  ${WEB_PLATFORMS.map(
+                    ({ mode, logo, labelKey }) => html`
                       <button
                         class=${classMap({ "mode-btn": true, active: this.mode === mode })}
                         aria-pressed=${this.mode === mode}
-                        aria-label=${label}
                         @click=${() => this._setMode(mode)}
                       >
                         <img class="mode-logo" src="/static/logo/${logo}" alt="" />
-                        <span class="mode-label">${label}</span>
+                        <span>${this._localize(labelKey)}</span>
                       </button>
-                    `;
-                  })}
+                    `
+                  )}
                 </div>
+                <esphome-web-mode-picker .mode=${this.mode}></esphome-web-mode-picker>
               `
             : nothing
         }
@@ -142,7 +141,7 @@ export class ESPHomeWebHeader extends LitElement {
         flex: 1;
       }
 
-      .mode-picker {
+      .mode-buttons {
         display: inline-flex;
         flex-shrink: 0;
         border-radius: var(--wa-border-radius-m);
@@ -191,8 +190,26 @@ export class ESPHomeWebHeader extends LitElement {
         flex-shrink: 0;
       }
 
-      /* Compact header below 870px: subtitle drops, logo shrinks, mode labels hide. */
-      @media (max-width: 870px) {
+      /* Every family by name while they fit beside the compact title, the
+         dropdown below that. 880px fits today's seven families and labels;
+         re-measure it when either changes, as .app-header clips overflow. */
+      esphome-web-mode-picker {
+        display: none;
+      }
+
+      @media (max-width: 880px) {
+        .mode-buttons {
+          display: none;
+        }
+
+        esphome-web-mode-picker {
+          display: block;
+        }
+      }
+
+      /* Compact header below 1070px, where the buttons and the full title no
+         longer fit together: subtitle drops, logo shrinks. */
+      @media (max-width: 1070px) {
         .app-header {
           gap: var(--wa-space-s);
         }
@@ -206,14 +223,6 @@ export class ESPHomeWebHeader extends LitElement {
           height: 32px;
           padding: 3px 0;
           box-sizing: border-box;
-        }
-
-        .mode-label {
-          display: none;
-        }
-
-        .mode-btn {
-          padding: 4px 8px;
         }
       }
     `,
