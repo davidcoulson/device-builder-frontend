@@ -34,6 +34,13 @@ export class XmodemError extends Error {
   }
 }
 
+/** The receiver stayed silent; the one start failure a sender may choose to go past. */
+export class XmodemNoStartError extends XmodemError {
+  constructor() {
+    super("Receiver never asked for the first block");
+  }
+}
+
 /** CRC-16/XMODEM: polynomial 0x1021, initial value 0. */
 export function crc16Xmodem(data: Uint8Array): number {
   let crc = 0;
@@ -62,12 +69,13 @@ export async function awaitStart(
     if (byte === CAN && ++cancels >= 2)
       throw new XmodemError("Receiver cancelled the transfer");
   }
-  throw new XmodemError("Receiver never asked for the first block");
+  throw new XmodemNoStartError();
 }
 
 /**
- * One block: STX for 1024 bytes, SOH for 128, the payload padded with
- * ``pad`` (YMODEM pads its header block with zeros), then the check.
+ * One block: SOH for 128 bytes, STX for anything bigger (1k, or a ROM's 1k
+ * that carries more), the payload padded with ``pad`` (YMODEM pads its
+ * header block with zeros), then the check.
  */
 export function buildBlock(
   seq: number,
@@ -77,7 +85,7 @@ export function buildBlock(
   pad = PAD
 ): Uint8Array {
   const block = new Uint8Array(3 + size + (crcMode ? 2 : 1));
-  block[0] = size === XMODEM_BLOCK_SIZE ? STX : SOH;
+  block[0] = size > 128 ? STX : SOH;
   block[1] = seq;
   block[2] = 0xff - seq;
   block.fill(pad, 3, 3 + size);

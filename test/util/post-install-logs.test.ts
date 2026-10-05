@@ -786,6 +786,44 @@ describe("handlePostInstallShowLogs serial baud", () => {
   });
 
   it.each([
+    ["logging is disabled", { ...detail(0) }],
+    [
+      "the port can't carry the console",
+      {
+        ...detail(115200),
+        webSerialPort: openPort({ usbVendorId: 0x1a86, usbProductId: 0x7523 }),
+        loggerInterface: "USB_SERIAL_JTAG",
+      },
+    ],
+  ])(
+    "keeps the install's notice when %s and it falls back to network logs",
+    async (_, base) => {
+      const dialog = logsDialog();
+      const event = new CustomEvent("request-show-logs-after-install", {
+        cancelable: true,
+        detail: { ...base, notice: "Reset the board" },
+      });
+      await handlePostInstallShowLogs(event, dialog as never, defaultLocalize);
+      expect(dialog.open).toHaveBeenCalledWith(
+        "OTA",
+        expect.objectContaining({ notice: "Reset the board" })
+      );
+    }
+  );
+
+  it("heads the serial logs with the install's notice", async () => {
+    const dialog = logsDialog();
+    const event = new CustomEvent("request-show-logs-after-install", {
+      cancelable: true,
+      detail: { ...detail(115200), notice: "Reset the board" },
+    });
+    await handlePostInstallShowLogs(event, dialog as never, defaultLocalize);
+    expect(dialog.openPassive).toHaveBeenCalledWith(
+      expect.objectContaining({ notice: "Reset the board" })
+    );
+  });
+
+  it.each([
     ["rp2", "object"],
     ["esp32", "undefined"],
   ])("wires Reset Device for %s the way a card launch does", async (platform, kind) => {

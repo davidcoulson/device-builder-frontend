@@ -30,7 +30,7 @@ export interface SerialResetHook {
 export function openOta(
   host: ESPHomeLogsDialog,
   port: string,
-  options: { onBackToInstall?: () => void } = {}
+  options: { onBackToInstall?: () => void; notice?: string } = {}
 ): void {
   beginSession(host, options.onBackToInstall);
   host._reconnect = null;
@@ -38,6 +38,7 @@ export function openOta(
   host._session = { kind: "ota", port, streamId: null };
   host._open = true;
   host._resetAnsiLogScroll();
+  if (options.notice) host._log.append([options.notice]);
   // Not awaiting the teardown in beginSession (unlike toggleShowStates):
   // openOta is only reached after a close, so any prior session is already
   // idle and the teardown is a no-op — there's no live stream to overlap.
@@ -55,6 +56,8 @@ export function openPassive(
     onResetDevice?: SerialResetHook;
     /** What the attach will bring: drives the source chip in every phase. */
     source?: PassiveSource;
+    /** Localized line heading the log, e.g. to reset a board that waits for it. */
+    notice?: string;
   }
 ): () => boolean {
   beginSession(host, options.onBackToInstall);
@@ -70,6 +73,7 @@ export function openPassive(
   if (host._passiveSource === "ble") {
     host._log.append([host._localize("dashboard.logs_ble_nus_connecting")]);
   }
+  if (options.notice) host._log.append([options.notice]);
   // For that attach: it may still be settling when this session is gone.
   return sessionMovedOn(host);
 }

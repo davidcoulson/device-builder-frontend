@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   BW15_PARTITIONS,
+  ltBinpatchTag,
   ltHeaderTags,
   ltPartInfoTags,
   ltPartitionTable,
@@ -193,6 +194,96 @@ describe("parseLibreTinyImage", () => {
     const deviceOnly = ltPartInfoTags([1, 0, 0, 0, 0, 0], ["ota1"]);
     const uf2 = makeLibreTinyUf2({ blocks: [{ addr: 0, tags: deviceOnly }] });
     expect(() => parse(uf2)).toThrow(/nothing to flash/);
+  });
+});
+
+describe("parseLibreTinyImage, the second OTA slot", () => {
+  const word = (value: number) => {
+    const data = new Uint8Array(256).fill(0x11);
+    new DataView(data.buffer).setUint32(8, value, true);
+    return data;
+  };
+  const uf2 = makeLibreTinyUf2({
+    blocks: [
+      {
+        addr: 0x0,
+        data: word(0x0800c000),
+        tags: [...OTA_INFO, ltBinpatchTag(0x104000 - 0xc000, [8])],
+      },
+    ],
+  });
+  const parseAs = (scheme: "flasher-ota1" | "flasher-ota2") =>
+    parseLibreTinyImage(uf2, [UF2_FAMILY_AMBZ2], { ...AMBZ2_PARSE, scheme });
+  const word8 = (data: Uint8Array) => new DataView(data.buffer).getUint32(8, true);
+
+  it("writes the first slot as it is", () => {
+    const [run] = parseAs("flasher-ota1").runs;
+    expect(run.address).toBe(0xc000);
+    expect(word8(run.data)).toBe(0x0800c000);
+  });
+
+  it("writes the second slot with the block's BINPATCH applied", () => {
+    const [run] = parseAs("flasher-ota2").runs;
+    expect(run.address).toBe(0x104000);
+    expect(word8(run.data)).toBe(0x08104000);
+    expect(run.data[0]).toBe(0x11);
+  });
+
+  it("refuses the second slot of a file that carries no BINPATCH", () => {
+    const plain = makeLibreTinyUf2({
+      blocks: [{ addr: 0x0, data: word(0x0800c000), tags: OTA_INFO }],
+    });
+    const as = (scheme: "flasher-ota1" | "flasher-ota2") =>
+      parseLibreTinyImage(plain, [UF2_FAMILY_AMBZ2], { ...AMBZ2_PARSE, scheme });
+    expect(as("flasher-ota1").runs).toHaveLength(1);
+    expect(() => as("flasher-ota2")).toThrow(/no BINPATCH for the second slot/);
+  });
+
+  it("refuses a BINPATCH whose offset is not word aligned", () => {
+    const bad = makeLibreTinyUf2({
+      blocks: [
+        { addr: 0x0, data: word(0x0800c000), tags: [...OTA_INFO, ltBinpatchTag(4, [9])] },
+      ],
+    });
+    expect(() =>
+      parseLibreTinyImage(bad, [UF2_FAMILY_AMBZ2], {
+        ...AMBZ2_PARSE,
+        scheme: "flasher-ota2",
+      })
+    ).toThrow(/BINPATCH offset 9 not word aligned/);
+  });
+
+  it("refuses a BINPATCH that reaches past its block", () => {
+    const bad = makeLibreTinyUf2({
+      blocks: [{ addr: 0x0, tags: [...OTA_INFO, ltBinpatchTag(4, [254])] }],
+    });
+    expect(() =>
+      parseLibreTinyImage(bad, [UF2_FAMILY_AMBZ2], {
+        ...AMBZ2_PARSE,
+        scheme: "flasher-ota2",
+      })
+    ).toThrow(/BINPATCH/);
+  });
+
+  it.each([
+    ["an unknown opcode", [0x01, 4, 0, 0, 0, 0]],
+    ["a DIFF32 without its delta", [0xfe, 2, 0, 0]],
+    ["a DIFF32 with no offsets", [0xfe, 4, 0, 0, 0, 0]],
+    ["a length past the tag", [0xfe, 9, 0, 0, 0, 0, 8]],
+    ["a stray trailing byte", [0xfe, 5, 0, 0, 0, 0, 8, 0xfe]],
+    ["nothing in it", []],
+  ])("refuses a BINPATCH with %s instead of patching part of the slot", (_, bytes) => {
+    const bad = makeLibreTinyUf2({
+      blocks: [
+        { addr: 0x0, tags: [...OTA_INFO, ltTag(LT_TAG.BINPATCH, new Uint8Array(bytes))] },
+      ],
+    });
+    expect(() =>
+      parseLibreTinyImage(bad, [UF2_FAMILY_AMBZ2], {
+        ...AMBZ2_PARSE,
+        scheme: "flasher-ota2",
+      })
+    ).toThrow(/Invalid UF2: .*BINPATCH/);
   });
 });
 
