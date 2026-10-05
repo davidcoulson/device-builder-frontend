@@ -10,8 +10,8 @@ import { parseFailureCopy } from "../install/preparation.js";
 import { type ReceiverEngine, singleWholePart } from "./receiver-engine.js";
 import { serialRun } from "./serial-run.js";
 
-export function libretinyReceiverEngine(
-  install: LibreTinyInstall,
+export function libretinyReceiverEngine<Image>(
+  install: LibreTinyInstall<Image>,
   logs: SerialLogsPolicy
 ): ReceiverEngine {
   const { copy } = install;
@@ -74,6 +74,8 @@ export function libretinyReceiverEngine(
           }
           return {
             rebooted: result.rebooted,
+            ...(!result.rebooted &&
+              copy.logsNotice && { notice: localize(copy.logsNotice) }),
             note: byHand ? { message: localize(byHand) } : undefined,
           };
         }),

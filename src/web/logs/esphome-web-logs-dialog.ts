@@ -86,6 +86,12 @@ export class ESPHomeWebLogsDialog extends LitElement {
   /** The baud a reconnect reopens the port at; ESPHome's default unless set. */
   @property({ attribute: false }) baudRate?: number;
 
+  /** Localized line heading the next stream, e.g. to reset a board that waits for it. */
+  @property({ attribute: false }) notice = "";
+
+  // The notice heads one stream, not every reconnect after it.
+  private _noticeShown = false;
+
   @consume({ context: localizeContext, subscribe: true })
   @state()
   _localize: LocalizeFunc = (key) => key;
@@ -119,6 +125,11 @@ export class ESPHomeWebLogsDialog extends LitElement {
   // trigger a Lit render per line. Flushed early on teardown / clear / download.
   private _pendingLines: string[] = [];
   private _flushScheduled = 0;
+
+  // A new notice heads the next stream again.
+  protected willUpdate(changed: Map<string, unknown>): void {
+    if (changed.has("notice")) this._noticeShown = false;
+  }
 
   // One (open, source) → streaming reconcile: the device cards open with the
   // port already set, the flash receiver opens first and assigns the port
@@ -167,6 +178,10 @@ export class ESPHomeWebLogsDialog extends LitElement {
     if (!source) return; // no (open) port or device yet — legitimately quiet
     this._source = source;
     this._resetLines();
+    if (this.notice && !this._noticeShown) {
+      this._lines = [this.notice];
+      this._noticeShown = true;
+    }
     this._crashKind = null;
     this._paused = false;
     this._streaming = true;

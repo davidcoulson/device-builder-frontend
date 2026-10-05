@@ -37,6 +37,8 @@ export interface ReceiverLogs {
   knownPorts: SerialPort[];
   /** Whether the board is booting; if not, the logs wait for a reset by hand. */
   rebooted: boolean;
+  /** Not booting, but open the logs now, headed by this: how to reset it, and they show the boot. */
+  notice?: string;
 }
 
 /**
@@ -118,4 +120,6 @@ export const RECEIVER_ENGINES: Record<HandoffFlasher, () => Promise<ReceiverEngi
     (await import("../platforms/bk72xx/receiver-engine.js")).bkUartReceiverEngine,
   "ln-uart": async () =>
     (await import("../platforms/ln882x/receiver-engine.js")).lnUartReceiverEngine,
+  "rtl-ambz": async () =>
+    (await import("../platforms/rtl87xx/ambz-receiver-engine.js")).rtlAmbzReceiverEngine,
 };
