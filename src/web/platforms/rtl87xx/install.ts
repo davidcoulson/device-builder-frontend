@@ -1,28 +1,24 @@
-/** The RTL8720C (AmebaZ2) as web.esphome.io installs it: through the ROM downloader. */
-import { LIBRETINY_AMBZ2_GUIDE_URL } from "../../../common/docs.js";
+/** RTL87xx web install: the RTL8720C or RTL8710B ROM downloader, picked from the UF2's family. */
 import {
-  loadAmbz2Engine,
-  loadAmbz2Image,
+  loadRtl87xxImage,
+  type RtlImage,
+  runAmbz,
   runAmbz2,
 } from "../../../platforms/rtl87xx/index.js";
 import type { LibreTinyInstall } from "../../install/libretiny-install-dialog.js";
+import { RTL_AMBZ_INSTALL } from "./ambz-install.js";
+import { RTL_AMBZ2_INSTALL } from "./ambz2-install.js";
 
-export const RTL_INSTALL: LibreTinyInstall = {
-  copy: {
-    title: "web.rtl.install_title",
-    intro: "web.rtl.install_intro",
-    connecting: "firmware.rtl_connecting",
-    connectDetail: "firmware.rtl_connect_desc",
-    waiting: "firmware.rtl_wait_title",
-    waitDetail: "firmware.rtl_wait_desc",
-    guideLink: "firmware.rtl_guide_link",
-    done: "web.rtl.install_done",
-    doneByHand: "firmware.rtl_done_manual_reset",
-    failed: "firmware.rtl_flash_failed",
-    badFile: "firmware.rtl_bad_uf2",
-  },
-  guideUrl: LIBRETINY_AMBZ2_GUIDE_URL,
-  loadEngine: loadAmbz2Engine,
-  load: loadAmbz2Image,
-  run: runAmbz2,
+export const RTL87XX_INSTALL: LibreTinyInstall<RtlImage> = {
+  // Until a file names its chip: the shared title, intro and bad-file line;
+  // guideUrl and loadEngine are placeholders forImage always replaces.
+  copy: RTL_AMBZ2_INSTALL.copy,
+  guideUrl: RTL_AMBZ2_INSTALL.guideUrl,
+  loadEngine: RTL_AMBZ2_INSTALL.loadEngine,
+  load: loadRtl87xxImage,
+  run: (port, rtl, hooks) =>
+    rtl.chip === "ambz"
+      ? runAmbz(port, rtl.image, hooks)
+      : runAmbz2(port, rtl.image, hooks),
+  forImage: (rtl) => (rtl.chip === "ambz" ? RTL_AMBZ_INSTALL : RTL_AMBZ2_INSTALL),
 };

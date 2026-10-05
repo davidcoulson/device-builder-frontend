@@ -74,7 +74,15 @@ export interface LibreTinyInstall<Image = LibreTinyImage> {
     image: Image,
     hooks: LibreTinyFlashHooks
   ): Promise<LibreTinyFlashResult>;
+  /** For a family of several chips: the parsed file's chip copy, guide and engine. */
+  forImage?(image: Image): LibreTinyChip;
 }
+
+/** What follows a parsed file's chip in a family of several. */
+export type LibreTinyChip = Pick<
+  LibreTinyInstall<unknown>,
+  "copy" | "guideUrl" | "loadEngine"
+>;
 
 type InstallState = "idle" | "connecting" | "waiting" | "flashing" | "success" | "error";
 
@@ -110,6 +118,14 @@ export abstract class LibreTinyInstallDialog<Image = LibreTinyImage> extends Lit
   @query("input[type=file]") private _fileInput?: HTMLInputElement;
 
   private _abort: AbortController | null = null;
+  // The picked file's chip, for a family of several; else the family's own.
+  private get _active(): LibreTinyChip {
+    const prepared = this._image.state;
+    return (
+      (prepared.kind === "ready" && this.install.forImage?.(prepared.value)) ||
+      this.install
+    );
+  }
 
   // The UF2 is read and parsed when it is picked, so the click that installs
   // it goes straight to the port picker.
@@ -129,7 +145,9 @@ export abstract class LibreTinyInstallDialog<Image = LibreTinyImage> extends Lit
     const parsed = await this.install.load(bytes);
     if ("image" in parsed) {
       // While the user clicks Install and picks the port; the flash names a failure.
-      void this.install.loadEngine().catch(() => {});
+      void (this.install.forImage?.(parsed.image) ?? this.install)
+        .loadEngine()
+        .catch(() => {});
       return { value: parsed.image };
     }
     const { key, retryable } = parseFailureCopy(parsed.key);
@@ -243,7 +261,7 @@ export abstract class LibreTinyInstallDialog<Image = LibreTinyImage> extends Lit
     if (!live()) return;
     if ("detail" in result) {
       this._fail(
-        this._localize(result.key ?? this.install.copy.failed),
+        this._localize(result.key ?? this._active.copy.failed),
         connectFailureDetail(result.error, this._localize, () => result.detail)
       );
       return;
@@ -257,7 +275,7 @@ export abstract class LibreTinyInstallDialog<Image = LibreTinyImage> extends Lit
   }
 
   private _statusMessage(): string {
-    const { copy } = this.install;
+    const { copy } = this._active;
     switch (this._state) {
       case "connecting":
         return this._localize(copy.connecting);
@@ -284,9 +302,9 @@ export abstract class LibreTinyInstallDialog<Image = LibreTinyImage> extends Lit
   private _statusDetail(): string {
     switch (this._state) {
       case "connecting":
-        return this._localize(this.install.copy.connectDetail);
+        return this._localize(this._active.copy.connectDetail);
       case "waiting":
-        return this._localize(this.install.copy.waitDetail);
+        return this._localize(this._active.copy.waitDetail);
       case "error":
         return this._errorMessage;
       default:
@@ -334,8 +352,8 @@ export abstract class LibreTinyInstallDialog<Image = LibreTinyImage> extends Lit
       ${
         this._state === "waiting"
           ? html`<p class="guide">
-              <a href=${this.install.guideUrl} target="_blank" rel="noopener noreferrer"
-                >${this._localize(this.install.copy.guideLink)}</a
+              <a href=${this._active.guideUrl} target="_blank" rel="noopener noreferrer"
+                >${this._localize(this._active.copy.guideLink)}</a
               >
             </p>`
           : nothing

@@ -38,9 +38,13 @@ hardware classes behave differently:
   same one — test both.
 - **UART bridges** (CP210x, CH34x): no re-enumeration; DTR/RTS reset
   pulses work.
-- **RTL8720C kits** (BW15 and the like, behind a CH340): RTS drives CEN
-  and DTR drives the PA00 download strap, so a plain open (Chromium
-  asserts both lines) holds the chip in reset. Every logs open releases
+- **RTL87xx** is one family on the site; the picked UF2's family picks the
+  chip's ROM downloader.
+- **RTL8720C boards** mostly sit on a USB serial adapter wired to the log
+  port (TX2, RX2, GND, a solid 3.3 V supply) and are strapped by hand (PA00).
+  On a kit with its own USB port (BW15 and the like, behind a CH340), RTS
+  drives CEN and DTR drives the PA00 download strap, so a plain open
+  (Chromium asserts both lines) holds the chip in reset. Every logs open releases
   both lines right away (`RTL87XX_SERIAL_LOGS` in `src/platforms/rtl87xx/serial-logs.ts`); the install
   dialog's engine drives them itself and falls back to the manual strap.
 - **RTL8710B modules** (BW12, WR3 and the like, on a plain adapter):
