@@ -315,23 +315,6 @@ export function createDeviceColumns(
       enableHiding: true,
     },
     {
-      accessorKey: "project_name",
-      header: localize("dashboard.table_col_project_name"),
-      cell: (info) => valueCell("cell-mono", info.getValue() as string),
-      size: 200,
-      enableHiding: true,
-    },
-    {
-      // No custom sortFn: TanStack's auto-resolved ``alphanumeric``
-      // chunks digit runs, so ``2026.9.0`` sorts below ``2026.10.0``
-      // the way the firmware-version column above already does.
-      accessorKey: "project_version",
-      header: localize("dashboard.table_col_project_version"),
-      cell: (info) => valueCell("cell-mono", info.getValue() as string),
-      size: 180,
-      enableHiding: true,
-    },
-    {
       accessorKey: "comment",
       header: localize("dashboard.table_col_comment"),
       cell: (info) => valueCell("cell-comment", info.getValue() as string),

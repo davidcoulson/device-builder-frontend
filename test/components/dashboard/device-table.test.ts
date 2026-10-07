@@ -254,7 +254,7 @@ describe("device-table Version column identity gating", () => {
   });
 });
 
-describe("device-table project / network columns are ungated", () => {
+describe("device-table network column is ungated", () => {
   async function mountWith(
     device: ConfiguredDevice,
     columns: Record<string, boolean>
@@ -276,36 +276,24 @@ describe("device-table project / network columns are ungated", () => {
       .textContent!.trim();
   }
 
-  // The same dark-identity device whose Version column blanks above:
-  // these three carry no update verdict and are persisted backend-side,
-  // so blanking them would lose a whole offline fleet from the project
-  // filter and the column sort.
-  it("renders the persisted values where the Version column would blank", async () => {
+  it("renders the persisted network where the Version column would blank", async () => {
     const el = await mountWith(
       makeConfiguredDevice({
         api_enabled: false,
         runtime_state: {
           deployed_version: "2026.6.0",
           deployed_identity_live: false,
-          project_name: "apollo.plt-1",
-          project_version: "2026.09.06.0",
           network: "ethernet",
         },
       }),
-      { version: true, project_name: true, project_version: true, network: true }
+      { version: true, network: true }
     );
     expect(cellText(el, "version")).toBe("—");
-    expect(cellText(el, "project_name")).toBe("apollo.plt-1");
-    expect(cellText(el, "project_version")).toBe("2026.09.06.0");
     expect(cellText(el, "network")).toBe("ethernet");
   });
 
-  it("falls back to the placeholder when the firmware declares no project", async () => {
-    const el = await mountWith(makeConfiguredDevice({}), {
-      project_name: true,
-      network: true,
-    });
-    expect(cellText(el, "project_name")).toBe("—");
+  it("falls back to the placeholder before any announce names a link", async () => {
+    const el = await mountWith(makeConfiguredDevice({}), { network: true });
     expect(cellText(el, "network")).toBe("—");
   });
 });

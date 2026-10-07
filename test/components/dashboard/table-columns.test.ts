@@ -63,16 +63,7 @@ function renderActionsCell(rowOverrides: Partial<DeviceRow> = {}): TemplateResul
   return col.cell(info) as TemplateResult;
 }
 
-const DATA_COLUMNS = [
-  "address",
-  "ip",
-  "version",
-  "comment",
-  "area",
-  "mac_address",
-  "project_name",
-  "project_version",
-];
+const DATA_COLUMNS = ["address", "ip", "version", "comment", "area", "mac_address"];
 
 describe("device table empty-cell placeholder (#1038)", () => {
   for (const key of DATA_COLUMNS) {
@@ -103,15 +94,6 @@ describe("device table empty-cell placeholder (#1038)", () => {
     const html = rendered(renderCell("network", "ethernet"));
     expect(html).toContain("cell-badge");
     expect(html).toContain("ethernet");
-  });
-
-  it("project columns keep the monospace value font when populated", () => {
-    expect(rendered(renderCell("project_name", "apollo.plt-1"))).toContain(
-      "apollo.plt-1"
-    );
-    const version = rendered(renderCell("project_version", "2026.09.06.0"));
-    expect(version).toContain("cell-mono");
-    expect(version).toContain("2026.09.06.0");
   });
 
   it("keeps the monospace value font when a value is present", () => {

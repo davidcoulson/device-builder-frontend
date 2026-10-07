@@ -50,23 +50,16 @@ describe("dashboard-url comma round-trip", () => {
     expect(readDashboardUrl().labels).toEqual(["a,b", "c"]);
   });
 
-  it("round-trips the project and network facets", () => {
+  it("round-trips the network facet", () => {
     installUrl();
-    writeDashboardUrl({
-      projects: ["dcoulson.ble-rrn00-wroom06", "apollo.plt-1"],
-      networks: ["wifi", "ethernet"],
-    });
-    const back = readDashboardUrl();
-    expect(back.projects).toEqual(["dcoulson.ble-rrn00-wroom06", "apollo.plt-1"]);
-    expect(back.networks).toEqual(["wifi", "ethernet"]);
+    writeDashboardUrl({ networks: ["wifi", "ethernet"] });
+    expect(readDashboardUrl().networks).toEqual(["wifi", "ethernet"]);
   });
 
-  it("omits both params when nothing is selected", () => {
+  it("omits the network param when nothing is selected", () => {
     installUrl();
-    writeDashboardUrl({ projects: [], networks: [] });
-    const back = readDashboardUrl();
-    expect(back.projects).toBeUndefined();
-    expect(back.networks).toBeUndefined();
+    writeDashboardUrl({ networks: [] });
+    expect(readDashboardUrl().networks).toBeUndefined();
   });
 
   it("round-trips multiple filter lists", () => {

@@ -2,9 +2,8 @@
  * Pure device-list filtering for the dashboard's faceted toolbar.
  *
  * The dashboard renders the configured-device list through a fixed
- * pipeline: facet narrowing (labels / area / platform / project /
- * network / state / update-status) followed by a free-text name
- * search. Lifting that
+ * pipeline: facet narrowing (labels / area / platform / network /
+ * state / update-status) followed by a free-text name search. Lifting that
  * pipeline out of the component keeps the rules testable over plain
  * arrays — no Lit element, no ``window``, no DOM — and gives the
  * "are any filters active?" / "how many facet pills are lit?"
@@ -27,8 +26,6 @@ export interface FacetSelection {
   selectedLabels: string[];
   selectedAreas: string[];
   selectedPlatforms: string[];
-  /** ``project_name`` values selected in the Project facet. */
-  selectedProjects: string[];
   /** ``network`` values (``wifi`` / ``ethernet``) selected in the
    *  Network facet. */
   selectedNetworks: string[];
@@ -41,8 +38,8 @@ export interface FacetSelection {
  *
  * Labels and update-status use AND semantics (a device must carry
  * every selected label / satisfy every selected update bucket — the
- * "drill down by tag stack" shape); area, platform, project, network
- * and state use OR within the facet and AND across facets, the
+ * "drill down by tag stack" shape); area, platform, network and
+ * state use OR within the facet and AND across facets, the
  * conventional faceted-search shape. An empty selection array leaves
  * that facet inactive.
  */
@@ -54,7 +51,6 @@ export function applyFacetFilters(
     selectedLabels,
     selectedAreas,
     selectedPlatforms,
-    selectedProjects,
     selectedNetworks,
     selectedStates,
     selectedUpdateStatus,
@@ -77,17 +73,8 @@ export function applyFacetFilters(
     const set = new Set(selectedPlatforms);
     out = out.filter((d) => set.has(d.target_platform));
   }
-  // Truthiness-guarded like the area facet above: the facet itself
-  // never offers an empty option, but ``?projects=`` is hand-editable,
-  // and an empty id would otherwise sweep in every device that has no
-  // project at all.
-  if (selectedProjects.length > 0) {
-    const set = new Set(selectedProjects);
-    out = out.filter((d) => {
-      const project = d.runtime_state.project_name;
-      return !!project && set.has(project);
-    });
-  }
+  // Truthiness-guarded like the area facet: ``?networks=`` is
+  // hand-editable, and an empty id would sweep in every unknown link.
   if (selectedNetworks.length > 0) {
     const set = new Set(selectedNetworks);
     out = out.filter((d) => {
@@ -125,7 +112,6 @@ export function activeFacetCount(selection: FacetSelection): number {
     selection.selectedLabels.length +
     selection.selectedAreas.length +
     selection.selectedPlatforms.length +
-    selection.selectedProjects.length +
     selection.selectedNetworks.length +
     selection.selectedStates.length +
     selection.selectedUpdateStatus.length
@@ -136,8 +122,8 @@ export function activeFacetCount(selection: FacetSelection): number {
  * True when *device* matches the lowered free-text *query*.
  *
  * Card view matches on name only; table view also matches address /
- * IP / platform / project / MAC so "Select all" tracks the table's
- * global filter. *query* must already be lower-cased (matching
+ * IP / platform / MAC so "Select all" tracks the table's global
+ * filter. *query* must already be lower-cased (matching
  * ``matchesDeviceName``); the MAC predicate is shared with the table
  * so the two can't drift.
  */
@@ -152,8 +138,6 @@ export function matchesDeviceSearch(
     device.address.toLowerCase().includes(query) ||
     device.runtime_state.ip_addresses.some((ip) => ip.toLowerCase().includes(query)) ||
     device.target_platform.toLowerCase().includes(query) ||
-    device.runtime_state.project_name.toLowerCase().includes(query) ||
-    device.runtime_state.project_version.toLowerCase().includes(query) ||
     matchesMacAddress(device.mac_address, query)
   );
 }

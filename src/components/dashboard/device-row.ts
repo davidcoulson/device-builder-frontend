@@ -15,12 +15,7 @@ export interface DeviceRow {
   mac_address: string;
   platform: string;
   version: string;
-  /** Running firmware's project identity and the link it announced
-   *  over, straight off ``runtime_state`` — ungated, unlike
-   *  ``version``: these carry no update verdict, and the backend
-   *  persists them so an offline row keeps reporting them. */
-  project_name: string;
-  project_version: string;
+  /** Link the device announced over, ungated (it carries no update verdict). */
   network: string;
   comment: string;
   area: string;

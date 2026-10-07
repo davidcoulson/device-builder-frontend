@@ -40,7 +40,6 @@ function emptySelection(): FacetSelection {
     selectedLabels: [],
     selectedAreas: [],
     selectedPlatforms: [],
-    selectedProjects: [],
     selectedNetworks: [],
     selectedStates: [],
     selectedUpdateStatus: [],
@@ -71,24 +70,13 @@ describe("renderFacetSections", () => {
   it("renders labels + area + platform + status + updates when the fleet warrants", () => {
     const { sections } = mount();
     // Two distinct platforms (>1), one named area (>0), both update
-    // buckets. No fixture declares a project or a network, so neither
-    // of those sections surfaces.
+    // buckets. No fixture announces a network, so that section stays hidden.
     expect(keys(sections)).toEqual(["labels", "area", "platform", "status", "updates"]);
   });
 
   it("suppresses labels / status / updates in YAML mode, keeps area + platform", () => {
     const { sections } = mount({ yamlMode: true });
     expect(keys(sections)).toEqual(["area", "platform"]);
-  });
-
-  it("surfaces the project section from a single bucket up", () => {
-    const devices = [
-      makeConfiguredDevice({
-        configuration: "p.yaml",
-        runtime_state: { project_name: "apollo.plt-1" },
-      }),
-    ];
-    expect(keys(mount({ devices }).sections)).toContain("project");
   });
 
   it("needs two networks before the network section is worth a pill", () => {
@@ -117,20 +105,18 @@ describe("renderFacetSections", () => {
     expect(keys(mount({ devices: mixed }).sections)).toContain("network");
   });
 
-  it("suppresses project / network in YAML mode — both are mDNS-observed", () => {
+  it("suppresses network in YAML mode, since it is mDNS-observed", () => {
     const devices = [
       makeConfiguredDevice({
         configuration: "a.yaml",
-        runtime_state: { project_name: "apollo.plt-1", network: "wifi" },
+        runtime_state: { network: "wifi" },
       }),
       makeConfiguredDevice({
         configuration: "b.yaml",
-        runtime_state: { project_name: "apollo.plt-1", network: "ethernet" },
+        runtime_state: { network: "ethernet" },
       }),
     ];
-    const rendered = keys(mount({ devices, yamlMode: true }).sections);
-    expect(rendered).not.toContain("project");
-    expect(rendered).not.toContain("network");
+    expect(keys(mount({ devices, yamlMode: true }).sections)).not.toContain("network");
   });
 
   it("forwards manageLabels to the labels section's managed property", () => {

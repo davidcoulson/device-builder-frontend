@@ -50,8 +50,6 @@ const _BASE = {
     ip_addresses: [],
     deployed_version: "",
     deployed_config_hash: "",
-    project_name: "",
-    project_version: "",
     network: "",
     queued_update: false,
     api_encryption_active: null,

@@ -19,7 +19,6 @@ const FULL = {
   labels: ["lbl-1"],
   areas: ["Kitchen"],
   platforms: ["esp32"],
-  projects: ["apollo.plt-1"],
   networks: ["wifi"],
   states: ["online"],
   updates: ["update_available"],
@@ -54,19 +53,17 @@ describe("dashboard filter session seeding", () => {
     expect(page._selectedLabels).toEqual(["lbl-1"]);
     expect(page._selectedAreas).toEqual(["Kitchen"]);
     expect(page._selectedPlatforms).toEqual(["esp32"]);
-    expect(page._selectedProjects).toEqual(["apollo.plt-1"]);
     expect(page._selectedNetworks).toEqual(["wifi"]);
     expect(page._selectedStates).toEqual(["online"]);
     expect(page._selectedUpdateStatus).toEqual(["update_available"]);
   });
 
-  it("lets the URL win for the project facet while session seeds the rest", () => {
+  it("lets the URL win for the network facet while session seeds the rest", () => {
     saveDashboardFilters(FULL);
-    history.replaceState(null, "", "/?projects=dcoulson.rrn00");
+    history.replaceState(null, "", "/?networks=ethernet");
     const page = makePage();
     hydrate(page);
-    expect(page._selectedProjects).toEqual(["dcoulson.rrn00"]);
-    expect(page._selectedNetworks).toEqual(["wifi"]);
+    expect(page._selectedNetworks).toEqual(["ethernet"]);
     expect(page._selectedPlatforms).toEqual(["esp32"]);
   });
 
@@ -96,7 +93,6 @@ describe("dashboard filter session seeding", () => {
       labels: ["lbl-1"],
       areas: [],
       platforms: [],
-      projects: [],
       networks: [],
       states: [],
       updates: [],

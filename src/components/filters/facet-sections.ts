@@ -18,7 +18,6 @@ import {
   computeAreaFacet,
   computeNetworkFacet,
   computePlatformFacet,
-  computeProjectFacet,
   computeStateFacet,
   computeUpdateFacet,
 } from "../../util/facets.js";
@@ -59,16 +58,15 @@ function renderLabelsFilter(ctx: FacetSectionsContext): TemplateResult {
 /**
  * The accordion sections, in canonical order. Mirrors the dashboard's
  * render rules: labels / status always render (status only off in YAML
- * mode), area / platform / project / network / updates surface only
- * when the fleet has something to filter by, and labels / status /
- * project / network / updates are suppressed in YAML mode (runtime +
- * metadata facets don't apply to YAML matches).
+ * mode), area / platform / network / updates surface only when the
+ * fleet has something to filter by, and labels / status / network /
+ * updates are suppressed in YAML mode (runtime + metadata facets don't
+ * apply to YAML matches).
  */
 export function renderFacetSections(ctx: FacetSectionsContext): TemplateResult {
   const { devices, localize, selection, yamlMode } = ctx;
   const areaOptions = computeAreaFacet(devices);
   const platformOptions = computePlatformFacet(devices);
-  const projectOptions = computeProjectFacet(devices);
   const networkOptions = computeNetworkFacet(devices);
   const stateOptions = computeStateFacet(devices, localize, selection.selectedStates);
   const updateOptions = computeUpdateFacet(
@@ -115,29 +113,8 @@ export function renderFacetSections(ctx: FacetSectionsContext): TemplateResult {
         : nothing
     }
     ${
-      // Both are mDNS-observed, so they're suppressed in YAML mode
-      // alongside the other runtime facets. Project surfaces from one
-      // bucket up (a single distributor build in an otherwise
-      // hand-written fleet is still worth isolating), while network
-      // needs two — a fleet that is entirely wifi learns nothing from
-      // a one-option pill, same rule as platform.
-      !yamlMode && projectOptions.length > 0
-        ? html`<esphome-filter-section
-            data-facet-key="project"
-            name=${localize("dashboard.filter_project")}
-            search-placeholder=${localize("dashboard.filter_project")}
-            empty-label=${emptyLabel}
-            no-matches-label=${noMatchesLabel}
-            ?searchable=${projectOptions.length > 8}
-            .options=${projectOptions}
-            .selected=${selection.selectedProjects}
-            @facet-change=${(e: CustomEvent<string[]>) => {
-              ctx.onChange({ selectedProjects: e.detail });
-            }}
-          ></esphome-filter-section>`
-        : nothing
-    }
-    ${
+      // mDNS-observed, so suppressed in YAML mode; needs two buckets,
+      // same rule as platform.
       !yamlMode && networkOptions.length > 1
         ? html`<esphome-filter-section
             data-facet-key="network"

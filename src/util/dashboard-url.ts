@@ -11,7 +11,6 @@
  *                    readable and stable across catalog reshuffles
  *  - ``areas``     — comma-separated area names
  *  - ``platforms`` — comma-separated target_platform values
- *  - ``projects``  — comma-separated mDNS project_name values
  *  - ``networks``  — comma-separated mDNS network values
  *                    (``wifi`` / ``ethernet``)
  *  - ``states``    — comma-separated DeviceState values
@@ -39,7 +38,6 @@ export interface DashboardUrlState {
   labels?: string[];
   areas?: string[];
   platforms?: string[];
-  projects?: string[];
   networks?: string[];
   states?: string[];
   updates?: string[];
@@ -82,7 +80,6 @@ export function readDashboardUrl(): DashboardUrlState {
     labels: fromCsv(p.get("labels")),
     areas: fromCsv(p.get("areas")),
     platforms: fromCsv(p.get("platforms")),
-    projects: fromCsv(p.get("projects")),
     networks: fromCsv(p.get("networks")),
     states: fromCsv(p.get("states")),
     updates: fromCsv(p.get("updates")),
@@ -101,7 +98,6 @@ export function writeDashboardUrl(state: DashboardUrlState): void {
   set("labels", toCsv(state.labels));
   set("areas", toCsv(state.areas));
   set("platforms", toCsv(state.platforms));
-  set("projects", toCsv(state.projects));
   set("networks", toCsv(state.networks));
   set("states", toCsv(state.states));
   set("updates", toCsv(state.updates));
