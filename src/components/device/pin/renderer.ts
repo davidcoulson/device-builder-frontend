@@ -16,6 +16,7 @@ import {
   isPrimitiveOrNullish,
 } from "../../../util/nested-values.js";
 import {
+  expanderHubRef,
   formatPinValue,
   isExpanderPinValue,
   parseBoardGpio,
@@ -37,6 +38,7 @@ import {
   renderSubstitutionHint,
   tooltipAnchorId,
 } from "../config-entry-renderers-shared.js";
+import { renderExpanderPin, resolveExpanderHub } from "./expander-pin.js";
 import { renderPinWiring } from "./wiring.js";
 
 // `parsePinGpio` / `formatPinValue` moved to `util/pin/gpio.ts` so the YAML
@@ -149,11 +151,9 @@ function boardPinsForSection(
       const provider = providerKeyOf(preset);
       const hub =
         provider !== undefined
-          ? (preset as Record<string, unknown>)[provider]
-          : undefined;
-      if (provider !== undefined && typeof hub === "string" && hub !== "") {
-        tokens.add(`${provider}:${hub}:*`);
-      }
+          ? expanderHubRef((preset as Record<string, unknown>)[provider])
+          : null;
+      if (hub !== null) tokens.add(`${provider}:${hub}:*`);
     }
   }
   return { lockedGpios, gpios, tokens };
@@ -333,8 +333,8 @@ export function renderPinField(
   // The wa-option values are the platform's value form (`GPIOn`, or `P0.x`
   // for nRF52), so normalise before comparing or the disabled select renders
   // blank.
-  const identity = parsePinGpio(rawValue);
-  if (typeof identity === "string") {
+  const identity = parsePinGpio(resolveExpanderHub(rawValue, ctx.substitutions));
+  if (typeof identity === "string" || isExpanderPinValue(rawValue)) {
     // An I/O-expander pin is a `provider:hub:channel` channel, never a board
     // GPIO, so the board-GPIO picker can't represent it regardless of disabled
     // state — show the channel read-only. Gating this on disabled would let an
@@ -344,18 +344,14 @@ export function renderPinField(
     // editable, scoped to the provider), just not the board-GPIO selector.
     // Board designations via ``suggestions`` count too (fail closed): a
     // suggestion that isn't a board GPIO is an expander token candidate.
-    const suggestedTokens = (entry.suggestions ?? []).some(
-      (sug) => typeof sug === "string" && parseBoardGpio(sug) === null && sug === identity
-    );
-    return renderExpanderPin(
-      entry,
-      path,
-      ctx,
-      identity,
-      rawValue,
-      suggestedTokens ||
-        designationMatches(boardPinsForSection(ctx, path).tokens, identity)
-    );
+    const token = typeof identity === "string" ? identity : null;
+    const preset =
+      token !== null &&
+      ((entry.suggestions ?? []).some(
+        (sug) => typeof sug === "string" && parseBoardGpio(sug) === null && sug === token
+      ) ||
+        designationMatches(boardPinsForSection(ctx, path).tokens, token));
+    return renderExpanderPin(entry, path, ctx, token, rawValue, preset);
   }
   // Fall back to alias resolution (`RX` → GPIO3) when the value isn't a
   // `GPIOn` form; this drives both the selected option and the re-add of a
@@ -592,43 +588,6 @@ function renderSubstitutionPin(
         ctx,
         rawValue,
         boardPin,
-        guarded,
-      })}
-    </div>
-  `;
-}
-
-/**
- * Render an I/O-expander pin: the `provider:hub:channel` channel shown read-only
- * (an expander channel isn't a board GPIO, so the board-pin picker can't
- * represent it) plus the Advanced mode-flag disclosure — the channel's mode is
- * still editable, scoped to the provider.
- */
-function renderExpanderPin(
-  entry: ConfigEntry,
-  path: string[],
-  ctx: RenderCtx,
-  identity: string,
-  rawValue: unknown,
-  boardPreset: boolean
-): TemplateResult {
-  const [provider, hub, channel] = identity.split(":");
-  const guarded = boardPreset && !effectiveDisabled(entry, ctx);
-  return html`
-    <div class="field" data-field-key=${fieldKeyAttr(path)}>
-      ${renderLabel(entry, ctx, { path })}
-      <input
-        type="text"
-        readonly
-        .value=${ctx.localize("device.pin_on_expander", { provider, hub, channel })}
-      />
-      ${renderFieldError(path, ctx)}
-      ${renderPinWiring({
-        entry,
-        path,
-        ctx,
-        rawValue,
-        boardPin: null,
         guarded,
       })}
     </div>
