@@ -2,7 +2,7 @@ import { clearPathErrors, validateEntries } from "../../../util/config-validatio
 import { isPlatformComponentId } from "../../../util/featured-id.js";
 import { fireEvent } from "../../../util/fire-event.js";
 import { formatApiError } from "../../../util/format-api-error.js";
-import { setIn } from "../../../util/nested-values.js";
+import { isUnderScalar, setIn } from "../../../util/nested-values.js";
 import { notifyError, notifySuccess } from "../../../util/notify.js";
 import {
   KEEP_EMPTY_STRING_SECTIONS,
@@ -18,6 +18,7 @@ import { resolveCurrentFromLine } from "../../../util/yaml-sections.js";
 import type { ConfigEntryValueChange } from "../config-entry-form.js";
 import type { ESPHomeDeviceSectionConfig } from "../device-section-config.js";
 import { fireSectionEvent, prepareSectionEvent } from "../section-editor.js";
+import { readStaleValues } from "./loading.js";
 
 // Validates against the *render* schema (resolveSectionEntries), not the raw
 // catalog. MAP_SECTIONS (substitutions / packages) carry an irrelevant flat
@@ -84,11 +85,27 @@ function emitYamlDraft(host: ESPHomeDeviceSectionConfig, newYaml: string): strin
   return newYaml;
 }
 
+/** Reads the values first when they are stale, and returns the *changes*
+ *  that still have a place to write. What wrote them is from before the
+ *  edit, which may have left a plain value where they write (a pin in its
+ *  short form) that the write would replace. Those are dropped, the form
+ *  shows the values just read. */
+function writable<T extends { path: string[] }>(
+  host: ESPHomeDeviceSectionConfig,
+  changes: T[]
+): T[] {
+  if (!readStaleValues(host)) return changes;
+  const kept = changes.filter(({ path }) => !isUnderScalar(host._values, path));
+  if (kept.length !== changes.length) host._valuesRead++;
+  return kept;
+}
+
 export function onValueChange(
   host: ESPHomeDeviceSectionConfig,
   e: CustomEvent<ConfigEntryValueChange>
 ): void {
   if (host._reloading) return;
+  if (!writable(host, [e.detail]).length) return;
   const { path, value } = e.detail;
   host._values = setIn(host._values, path, value);
   host._setDirty(true);
@@ -120,7 +137,9 @@ export function applySectionValues(
   changes: { path: string[]; value: unknown }[]
 ): void {
   if (host._reloading) return;
-  for (const { path, value } of changes) {
+  const kept = writable(host, changes);
+  if (!kept.length) return;
+  for (const { path, value } of kept) {
     host._values = setIn(host._values, path, value);
   }
   host._setDirty(true);

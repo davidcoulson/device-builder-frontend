@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { ConfigEntry } from "../../../src/api/types/config-entries.js";
 import { ConfigEntryType } from "../../../src/api/types/config-entries.js";
 import {
   ALWAYS_SHOWN_KEYS,
   collectRenderablePaths,
   filterRenderable,
   renderFilterOptions,
+  type RenderFilterOptions,
   type RenderFilterSource,
 } from "../../../src/components/device/config-entry-render-filter.js";
 import { YamlRawValue } from "../../../src/util/yaml-serialize.js";
@@ -494,7 +496,7 @@ describe("filterRenderable", () => {
     expect(paths({ type: "local" })).toHaveLength(1);
     expect(paths({ type: "local" })[0].required).toBe(true);
     expect(paths({ type: "git" })).toHaveLength(1);
-    expect(paths({ type: "git" })[0].required).toBe(false);
+    expect(paths({ type: "git" })[0].required).toBeUndefined();
     expect(paths({ type: "other" })).toHaveLength(0);
   });
 
@@ -956,5 +958,172 @@ describe("collectRenderablePaths — scalar multi_value index paths (#1348)", ()
       { requiredOnly: false, showAdvanced: false }
     );
     expect([...paths].sort()).toEqual(["codes", "codes.0", "codes.1"]);
+  });
+});
+
+describe("filterRenderable requiredGroups", () => {
+  const groups = [{ kind: "at_least_one" as const, keys: ["identity", "certificate"] }];
+  const members = [makeEntry({ key: "identity" }), makeEntry({ key: "certificate" })];
+
+  it("keeps a demanded group's optional members in required-only mode", () => {
+    const out = filterRenderable(
+      members,
+      {},
+      {
+        requiredOnly: true,
+        showAdvanced: false,
+        requiredGroups: groups,
+      }
+    );
+    expect(out.map((e) => e.key)).toEqual(["identity", "certificate"]);
+  });
+
+  it("does not apply the scope's groups inside a nested block", () => {
+    const nested = [
+      makeEntry({ key: "eap", type: ConfigEntryType.NESTED, config_entries: members }),
+    ];
+    const out = filterRenderable(
+      nested,
+      {},
+      {
+        requiredOnly: true,
+        showAdvanced: false,
+        requiredGroups: groups,
+      }
+    );
+    expect(out).toEqual([]);
+  });
+});
+
+describe("filterRenderable demanded NESTED members", () => {
+  const block = (key: string) =>
+    makeEntry({
+      key,
+      type: ConfigEntryType.NESTED,
+      config_entries: [makeEntry({ key: "resolution", default_value: "23" })],
+    });
+  const opts = { requiredOnly: true, showAdvanced: false };
+
+  it("keeps a demanded block that has no renderable child", () => {
+    const groups = [{ kind: "exactly_one" as const, keys: ["pwm", "dac"] }];
+    const out = filterRenderable(
+      [block("pwm"), block("dac")],
+      {},
+      {
+        ...opts,
+        requiredGroups: groups,
+      }
+    );
+    expect(out.map((e) => e.key)).toEqual(["pwm", "dac"]);
+  });
+
+  it("keeps it outside required-only mode too, when only advanced children hide it", () => {
+    // A flat host with the advanced toggle off: a banner demanding a block
+    // that does not paint is the same dead end as in the add form.
+    const advancedOnly = makeEntry({
+      key: "pwm",
+      type: ConfigEntryType.NESTED,
+      config_entries: [makeEntry({ key: "divider", advanced: true, default_value: "1" })],
+    });
+    const flat = { requiredOnly: false, showAdvanced: false };
+    const groups = [{ kind: "exactly_one" as const, keys: ["pwm", "dac"] }];
+    expect(filterRenderable([advancedOnly], {}, flat)).toEqual([]);
+    expect(
+      filterRenderable([advancedOnly], {}, { ...flat, requiredGroups: groups }).map(
+        (e) => e.key
+      )
+    ).toEqual(["pwm"]);
+  });
+
+  it("drops a demanded block its switch could write nothing into", () => {
+    // Painting it would hold Add on a switch that snaps back off.
+    const bare = (key: string, child: Partial<ConfigEntry>) =>
+      makeEntry({
+        key,
+        type: ConfigEntryType.NESTED,
+        config_entries: [makeEntry({ key: "resolution", ...child })],
+      });
+    const unseedable = [
+      bare("pwm", {}),
+      bare("dac", { default_value: "" }),
+      bare("fan", { default_value: "1", locked: true }),
+      bare("out", { default_value: "1", depends_on_component: "wifi" }),
+    ];
+    const all = [{ kind: "at_least_one" as const, keys: ["pwm", "dac", "fan", "out"] }];
+    expect(
+      filterRenderable(
+        unseedable,
+        {},
+        { ...opts, requiredGroups: all, presentComponents: new Set<string>() }
+      )
+    ).toEqual([]);
+  });
+
+  it("treats a cleared empty string at the block key as unset, as the renderer does", () => {
+    const groups = [{ kind: "exactly_one" as const, keys: ["pwm", "dac"] }];
+    expect(filterRenderable([block("fan")], { fan: "" }, opts)).toEqual([]);
+    expect(filterRenderable([block("fan")], { fan: "GPIO5" }, opts)).toHaveLength(1);
+    // A demanded one keeps its switch either way.
+    expect(
+      filterRenderable([block("pwm")], { pwm: "" }, { ...opts, requiredGroups: groups })
+    ).toHaveLength(1);
+  });
+
+  it("still drops an undemanded block with no renderable child", () => {
+    expect(filterRenderable([block("pwm")], {}, opts)).toEqual([]);
+  });
+});
+
+describe("filterRenderable with a nested block's own required groups", () => {
+  const eap = makeEntry({
+    key: "eap",
+    type: ConfigEntryType.NESTED,
+    required_groups: [{ kind: "at_least_one", keys: ["identity", "certificate"] }],
+    config_entries: [
+      makeEntry({ key: "identity" }),
+      makeEntry({ key: "certificate" }),
+      makeEntry({ key: "username", required: true }),
+    ],
+  });
+  const opts = { requiredOnly: true, showAdvanced: false };
+  const paths = (
+    values: Record<string, unknown>,
+    extra: Partial<RenderFilterOptions> = {}
+  ) => [...collectRenderablePaths([eap], values, { ...opts, ...extra })].sort();
+
+  it("keeps the demanded members visible once the block is in use", () => {
+    expect(paths({ eap: { username: "me" } })).toEqual([
+      "eap",
+      "eap.certificate",
+      "eap.identity",
+      "eap.username",
+    ]);
+  });
+
+  it("demands nothing of an untouched block", () => {
+    expect(paths({})).toEqual(["eap", "eap.username"]);
+  });
+
+  it("keeps the all-or-none companion of a demanded member visible", () => {
+    const pair = makeEntry({
+      key: "eap",
+      type: ConfigEntryType.NESTED,
+      required_groups: [{ kind: "at_least_one", keys: ["identity", "certificate"] }],
+      config_entries: [
+        makeEntry({ key: "identity" }),
+        makeEntry({ key: "certificate", group: "cert_and_key" }),
+        makeEntry({ key: "key", group: "cert_and_key" }),
+        makeEntry({ key: "username" }),
+      ],
+    });
+    const shown = [...collectRenderablePaths([pair], { eap: { username: "me" } }, opts)];
+    expect(shown.sort()).toEqual(["eap", "eap.certificate", "eap.identity", "eap.key"]);
+  });
+
+  it("never applies the parent scope's groups inside the block", () => {
+    const parent = {
+      requiredGroups: [{ kind: "at_least_one" as const, keys: ["identity"] }],
+    };
+    expect(paths({}, parent)).toEqual(["eap", "eap.username"]);
   });
 });

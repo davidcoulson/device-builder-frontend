@@ -1,19 +1,27 @@
 import { html, nothing } from "lit";
 import type { ConfigEntry } from "../../../api/types/config-entries.js";
+import { ConfigEntryType } from "../../../api/types/config-entries.js";
 import { renderMarkdown } from "../../../util/markdown.js";
-import { isPlainObject } from "../../../util/nested-values.js";
+import { isPlainObject, isPrimitiveOrNullish } from "../../../util/nested-values.js";
+import { isSensitiveKeyUnder } from "../../../util/yaml-sensitive-redact.js";
 import { hasSerializableValue } from "../../../util/yaml-serialize.js";
+import { enableSeed, isSwitchable } from "../config-entry-enable-seed.js";
+import { ownRequiredGroups } from "../config-entry-render-filter.js";
 import {
+  describedText,
   effectiveDisabled,
   fieldKeyAttr,
+  filterOptionsAt,
   labelFor,
-  renderChildEntries,
   type RenderCtx,
   renderFieldError,
   renderHelpLink,
   renderLabel,
 } from "../config-entry-renderers-shared.js";
-import { hasNameChild, seedIdFor } from "./seed-identity.js";
+import { renderConstraintBanners } from "./constraint-banner-view.js";
+import { collectUnsatisfiedConstraints } from "./constraint-banners.js";
+import { type Rekey, rekeyStore } from "./row-memory.js";
+import { nextIdFor } from "./seed-identity.js";
 
 // Stash of the values a sub-reading held when its enable switch was
 // turned off, keyed by the form's ``stashOwner`` (the host element,
@@ -22,6 +30,18 @@ import { hasNameChild, seedIdFor } from "./seed-identity.js";
 // unit / accuracy / filters the user configured — only the next flip
 // back recovers it (mirrors the templatable literal/lambda stash).
 const _enableStashes = new WeakMap<object, Map<string, Record<string, unknown>>>();
+
+/** Forget every stashed sub-reading of *owner*'s fields; see
+ *  ``clearTemplatableStash``. */
+export function clearEnableStash(owner: object): void {
+  _enableStashes.delete(owner);
+}
+
+/** Renumber *owner*'s stash after a list row left; see ``row-memory``. */
+export function rekeyEnableStash(owner: object, rekey: Rekey): void {
+  const stash = _enableStashes.get(owner);
+  if (stash) rekeyStore(stash, rekey);
+}
 
 function _enableStash(ctx: RenderCtx): Map<string, Record<string, unknown>> {
   let m = _enableStashes.get(ctx.stashOwner);
@@ -62,22 +82,50 @@ export function renderNestedField(entry: ConfigEntry, path: string[], ctx: Rende
   // fields are visible without a manual expand (advanced groups like
   // remote_receiver's raw are otherwise collapsed). seedNestedOpen is
   // one-shot, so a later user collapse sticks.
-  if (entry.required || hasSerializableValue(raw)) ctx.seedNestedOpen(key);
-  const isOpen = ctx.nestedOpenSections.has(key);
+  // A block with nothing to show here (the add form drops emc2101's
+  // advanced-only children) never opens: an empty body reads broken.
+  // The block's own required groups bind once it is in use: their members
+  // stay visible and an unmet one is named inside the box.
+  const scope = ctx.scopeValues(path);
+  const inUse = hasSerializableValue(raw);
+  const ownGroups = ownRequiredGroups(entry, raw);
+  const children = ctx.filterRenderable(entry.config_entries ?? [], scope, ownGroups);
+  const hasFields = children.length > 0;
+  if (hasFields && (entry.required || inUse)) ctx.seedNestedOpen(key);
+  // The toggle keeps its books on the raw set; only the paint is gated, so a
+  // block that later gains a field opens as the user last left it.
+  const userOpen = ctx.nestedOpenSections.has(key);
+  const isOpen = hasFields && userOpen;
   // Optional entity sub-readings (a debug component's per-metric sensors,
   // a DHT's temperature/humidity, …) are only written to YAML once their
   // group holds a value, so an untouched one is silently "off". Give those
   // an explicit enable switch; plain nested forms (platform_type === null)
   // and required groups keep the bare collapsible header.
   const isOptionalEntity = entry.platform_type != null && !entry.required;
-  const enabled = isOptionalEntity && hasSerializableValue(raw);
+  // A plain block a required group demands (emc2101's pwm / dac) may have no
+  // field the form paints, so the switch is how the user picks it. Offered
+  // only when it has something to write.
+  const isDemanded = isSwitchable(entry, filterOptionsAt(ctx, path));
+  const hasSwitch = isOptionalEntity || isDemanded;
+  const enabled = hasSwitch && inUse;
   const label = labelFor(entry, ctx);
   const enableLabel = ctx.localize("device.enable_entity", { name: label });
+  // A demanded block's own baked prose goes too (emc2101's pwm / dac).
+  const description = describedText(entry, path, ctx);
+  // Name what the block holds that the form does not paint: everything in a
+  // fieldless block, else a valued child the filter drops (a seeded default
+  // in required-only mode). Nothing to say when only nested values are left.
+  const painted = new Set(children.map((c) => c.key));
+  const setValues = enabled ? setValuesOf(entry, raw, ctx, painted) : "";
+  // With nothing to expand, the header is a plain title: the switch is the
+  // block's only control.
+  const title = html`<span class="nested-title">${label}</span>
+    ${entry.platform_type ? html`<span class="nested-platform">${entry.platform_type}</span>` : nothing}`;
   return html`
     <div class="nested-group" data-field-key=${fieldKeyAttr(path)}>
       <div class="nested-header">
         ${
-          isOptionalEntity
+          hasSwitch
             ? html`<wa-switch
                 class="nested-enable"
                 .checked=${enabled}
@@ -89,7 +137,7 @@ export function renderNestedField(entry: ConfigEntry, path: string[], ctx: Rende
                     entry,
                     path,
                     key,
-                    isOpen,
+                    isOpen: userOpen,
                     checked: (e.target as unknown as { checked: boolean }).checked,
                     label,
                     ctx,
@@ -97,30 +145,58 @@ export function renderNestedField(entry: ConfigEntry, path: string[], ctx: Rende
               ></wa-switch>`
             : nothing
         }
-        <button
-          type="button"
-          class="nested-toggle"
-          aria-expanded=${isOpen}
-          @click=${() => ctx.toggleNested(key)}
-        >
-          <wa-icon library="mdi" name=${isOpen ? "chevron-up" : "chevron-down"}></wa-icon>
-          <span class="nested-title">${label}</span>
-          ${
-            entry.platform_type
-              ? html`<span class="nested-platform">${entry.platform_type}</span>`
-              : nothing
-          }
-        </button>
+        ${
+          hasFields
+            ? html`<button
+                type="button"
+                class="nested-toggle"
+                aria-expanded=${isOpen}
+                @click=${() => ctx.toggleNested(key)}
+              >
+                <wa-icon
+                  library="mdi"
+                  name=${isOpen ? "chevron-up" : "chevron-down"}
+                ></wa-icon>
+                ${title}
+              </button>`
+            : html`<span class="nested-toggle nested-toggle--static">${title}</span>`
+        }
         ${renderHelpLink(entry, ctx)}
       </div>
       ${
-        entry.description
-          ? html`<p class="nested-desc">${renderMarkdown(entry.description)}</p>`
+        description
+          ? html`<p class="nested-desc">${renderMarkdown(description)}</p>`
+          : nothing
+      }
+      ${
+        setValues
+          ? html`<p class="nested-desc">
+              ${ctx.localize("device.enabled_block_sets", { values: setValues })}
+            </p>`
           : nothing
       }
       ${
         isOpen
-          ? html`<div class="nested-fields">${renderChildEntries(entry, path, ctx)}</div>`
+          ? html`<div class="nested-fields">
+              ${
+                inUse
+                  ? renderConstraintBanners(
+                      collectUnsatisfiedConstraints(
+                        {
+                          entries: entry.config_entries ?? [],
+                          requiredGroups: ownGroups,
+                          values: scope,
+                          opts: filterOptionsAt(ctx, path),
+                        },
+                        NO_CLUSTERS
+                      ),
+                      entry.config_entries ?? [],
+                      ctx
+                    )
+                  : nothing
+              }
+              ${children.map((child) => ctx.renderEntry(child, [...path, child.key]))}
+            </div>`
           : nothing
       }
     </div>
@@ -151,28 +227,10 @@ export function onEnableToggle(opts: {
     if (restored && hasSerializableValue(restored)) {
       stash.delete(key);
       ctx.emitChange(path, restored);
-    } else if (hasNameChild(entry)) {
-      // Seed the *localized* label the user is looking at, so the
-      // name they get matches the switch they clicked (WYSIWYG) and
-      // reads natively in their dashboard locale. It's a plain
-      // editable value, not locale-pinned state — don't "fix" this
-      // to the entry key.
-      ctx.emitChange([...path, "name"], label);
     } else {
-      // A nameless group (pipsolar's output sub-entities, opentherm's)
-      // rejects ``name:`` outright, so seed its id instead — required or
-      // not, it's the only identity the group has to serialize on.
-      const seed = seedIdFor(entry, ctx);
-      // With neither (a light's ``initial_state``) there's nothing valid to
-      // write, so re-emit the still-absent group: the switch the user just
-      // clicked has no backing value, and only a re-render walks it back to
-      // off. The group persists once they set one of its own fields. This
-      // leans on the host handing itself a fresh values object for every
-      // ``value-change``, no-op included (``setIn`` spreads unconditionally) —
-      // an identity-preserving fast path there would strand the switch on.
-      if (seed) ctx.emitChange([...path, seed.key], seed.id);
-      else ctx.emitChange(path, undefined);
+      seedFor(entry, path, label, ctx);
     }
+    // A block with no paintable field renders closed whatever this says.
     if (!isOpen) ctx.toggleNested(key);
   } else {
     // A sub-reading's value is always a plain object; narrow on that
@@ -185,4 +243,81 @@ export function onEnableToggle(opts: {
     ctx.emitChange(path, undefined);
     if (isOpen) ctx.toggleNested(key);
   }
+}
+
+// Writes the value that switching *entry* on seeds it with.
+function seedFor(
+  entry: ConfigEntry,
+  path: string[],
+  label: string,
+  ctx: RenderCtx
+): void {
+  const seed = enableSeed(entry, filterOptionsAt(ctx, path));
+  // The *localized* label the user is looking at seeds an entity's name, so
+  // it matches the switch they clicked (WYSIWYG) and reads natively in their
+  // dashboard locale. It's a plain editable value, not locale-pinned state —
+  // don't "fix" this to the entry key. A nameless group (pipsolar's output
+  // sub-entities, opentherm's) rejects ``name:`` outright, so it seeds its id
+  // instead — required or not, it's the only identity the group has to
+  // serialize on. With no identity at all (emc2101's pwm) a child's own
+  // default is the smallest value that makes the block serialize.
+  const value =
+    seed?.from === "name"
+      ? label
+      : seed?.from === "id"
+        ? nextIdFor(entry, ctx)
+        : seed?.value;
+  // With none of these (a light's ``initial_state``) there's nothing valid to
+  // write, so re-emit the still-absent group: the switch the user just
+  // clicked has no backing value, and only a re-render walks it back to
+  // off. The group persists once they set one of its own fields. This
+  // leans on the host handing itself a fresh values object for every
+  // ``value-change``, no-op included (``setIn`` spreads unconditionally) —
+  // an identity-preserving fast path there would strand the switch on.
+  if (!seed || value === undefined) ctx.emitChange(path, undefined);
+  else ctx.emitChange([...path, seed.key], value);
+}
+
+// A nested scope paints no cluster boxes, so every unmet group gets a banner.
+const NO_CLUSTERS: ReadonlySet<string> = new Set();
+
+const MASKED_VALUE = "••••••";
+const WHITESPACE_RUN_RE = /\s+/g;
+
+// What a block holds that the form does not paint, so a value the switch
+// wrote on the user's behalf is visible where it was written.
+function setValuesOf(
+  entry: ConfigEntry,
+  raw: unknown,
+  ctx: RenderCtx,
+  painted: ReadonlySet<string>
+): string {
+  if (!isPlainObject(raw)) return "";
+  const children = new Map((entry.config_entries ?? []).map((c) => [c.key, c]));
+  return Object.entries(raw)
+    .filter(
+      ([key, value]) =>
+        !painted.has(key) && isPrimitiveOrNullish(value) && hasSerializableValue(value)
+    )
+    .map(([key, value]) => {
+      const child = children.get(key);
+      const shown = shownValue(entry.key, key, value, child);
+      return `${child ? labelFor(child, ctx) : key}: ${shown}`;
+    })
+    .join(", ");
+}
+
+// A credential is masked in its own field; never spell it out here. The type
+// says so for a secure child; for any other key the editor's credential rules
+// decide from its spelling, with the block as parent (``key:`` under
+// ``encryption:``), so a mistyped or undeclared secret is covered too.
+function shownValue(
+  parentKey: string,
+  key: string,
+  value: unknown,
+  child: ConfigEntry | undefined
+): string {
+  const secret =
+    child?.type === ConfigEntryType.SECURE_STRING || isSensitiveKeyUnder(parentKey, key);
+  return secret ? MASKED_VALUE : String(value).replace(WHITESPACE_RUN_RE, " ");
 }

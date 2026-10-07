@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/components/dashboard/actions.js", () => ({
+  dialogLineHooks: () => ({ onLine: vi.fn() }),
   streamSerialToDialog: () => () => {},
 }));
 
@@ -18,14 +19,59 @@ const { toastError, toastInfo } = vi.hoisted(() => ({
   toastInfo: vi.fn(),
 }));
 vi.mock("sonner-js", () => ({ default: { error: toastError, info: toastInfo } }));
+const picoReset = vi.hoisted(() => ({
+  rebootPico: vi.fn<(port: SerialPort, cancelled: () => boolean) => Promise<boolean>>(),
+  webUsb: true,
+}));
+vi.mock("../../src/platforms/rp2/rp2-logs-reset.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/platforms/rp2/rp2-logs-reset.js")>()),
+  rebootPico: picoReset.rebootPico,
+}));
+// The real reopen by default; the reset hook's tests hand back their own port.
+const reacquire = vi.hoisted(() => ({
+  openLiveSerialPort:
+    vi.fn<typeof import("../../src/util/serial-reacquire.js").openLiveSerialPort>(),
+}));
+vi.mock("../../src/util/serial-reacquire.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../src/util/serial-reacquire.js")>();
+  reacquire.openLiveSerialPort.mockImplementation(actual.openLiveSerialPort);
+  return { ...actual, openLiveSerialPort: reacquire.openLiveSerialPort };
+});
+const bleStream = vi.hoisted(() => ({
+  streamBleNus:
+    vi.fn<
+      (
+        device: BluetoothDevice,
+        hooks: { onLine: (l: string) => void; onDisconnect?: () => void },
+        opts: { attempts: number; cancelled: () => boolean }
+      ) => Promise<() => Promise<void>>
+    >(),
+}));
+vi.mock("../../src/platforms/nrf52/ble-nus-stream.js", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../../src/platforms/nrf52/ble-nus-stream.js")
+  >()),
+  streamBleNus: bleStream.streamBleNus,
+}));
+vi.mock("../../src/platforms/rp2/web-usb.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/platforms/rp2/web-usb.js")>()),
+  isWebUsbSupported: () => picoReset.webUsb,
+}));
 
+import { pickerRefused, withUserActivation } from "../_web-serial.js";
 import { defaultLocalize } from "../../src/common/localize.js";
+import { BleNusServiceNotFoundError } from "../../src/platforms/nrf52/ble-nus-stream.js";
+import { nrf52Platform } from "../../src/platforms/nrf52/dashboard.js";
+import { PicoStrandedError } from "../../src/platforms/rp2/rp2-logs-reset.js";
+import type { PostInstallShowLogsDetail } from "../../src/util/post-install-dispatch.js";
 import {
+  attachBleLogs,
   attachSerialLogStream,
   formatSerialPortLabel,
   handlePostInstallShowLogs,
-  type PostInstallShowLogsDetail,
   reconnectWebSerialLogs,
+  sessionResetHook,
 } from "../../src/util/post-install-logs.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -112,6 +158,65 @@ describe("formatSerialPortLabel", () => {
 });
 
 describe("reconnectWebSerialLogs", () => {
+  it.each(["rtl87xx", "bk72xx"])(
+    "releases both lines after reopening the port of a %s",
+    async (platform) => {
+      const port = openPort();
+      const restore = withRequestPort(async () => port);
+      const dialog = stubDialog();
+      try {
+        await reconnectWebSerialLogs(
+          dialog as never,
+          defaultLocalize,
+          115200,
+          null,
+          () => false,
+          platform
+        );
+        expect(port.setSignals).toHaveBeenCalledWith({
+          dataTerminalReady: false,
+          requestToSend: false,
+        });
+        expect(dialog.setSerialStream).toHaveBeenCalledTimes(1);
+      } finally {
+        restore();
+      }
+    }
+  );
+
+  it("says the port may be in use when the reopen's open fails with NetworkError", async () => {
+    const port = openPort();
+    vi.mocked(port.open).mockRejectedValue(
+      new DOMException("Failed to open serial port.", "NetworkError")
+    );
+    const restore = withRequestPort(async () => port);
+    const dialog = stubDialog();
+    try {
+      await reconnectWebSerialLogs(dialog as never, (k) => k, 115200, null);
+      expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith("serial.port_in_use");
+      expect(dialog.setSerialStream).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("says to click again when the picker is refused after the click ran out", async () => {
+    const activation = withUserActivation(false);
+    const restore = withRequestPort(async () => {
+      throw pickerRefused();
+    });
+    const dialog = stubDialog();
+    try {
+      await reconnectWebSerialLogs(dialog as never, (k) => k, 115200, null);
+      expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith(
+        "serial.picker_needs_click"
+      );
+    } finally {
+      restore();
+      activation();
+    }
+  });
+
   it("acquires a fresh port via requestPort and streams it", async () => {
     const restore = withRequestPort(async () => openPort());
     const dialog = stubDialog();
@@ -120,6 +225,26 @@ describe("reconnectWebSerialLogs", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((navigator as any).serial.requestPort).toHaveBeenCalledTimes(1);
       expect(dialog.setSerialStream).toHaveBeenCalledTimes(1);
+      expect(dialog.setSerialOpenFailed).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves a newer session alone when the pick lands after the session moved on", async () => {
+    const restore = withRequestPort(async () => openPort());
+    const dialog = stubDialog();
+    try {
+      await reconnectWebSerialLogs(
+        dialog as never,
+        defaultLocalize,
+        115200,
+        null,
+        () => true
+      );
+      expect(dialog.setSerialStream).not.toHaveBeenCalled();
+      expect(dialog.abortSerialReconnect).not.toHaveBeenCalled();
+      expect(dialog.switchToNetworkLogs).not.toHaveBeenCalled();
       expect(dialog.setSerialOpenFailed).not.toHaveBeenCalled();
     } finally {
       restore();
@@ -216,7 +341,265 @@ describe("reconnectWebSerialLogs", () => {
   });
 });
 
+describe("the Pico's Reset Device hook, through sessionResetHook", () => {
+  // The port only reaches the mocked reboot and reopen, so any handle serves.
+  const runHook = (
+    dialog: ReturnType<typeof stubDialog>,
+    cancelled: boolean,
+    baud = 115200,
+    port: SerialPort = openPort()
+  ) =>
+    sessionResetHook(dialog as never, defaultLocalize, "rp2", baud)!.run(
+      port,
+      () => cancelled
+    );
+
+  it("is offered only for rp2 on a WebUSB browser", () => {
+    const dialog = stubDialog() as never;
+    expect(sessionResetHook(dialog, defaultLocalize, "rp2", 115200)).toBeTypeOf("object");
+    expect(sessionResetHook(dialog, defaultLocalize, "esp32", 115200)).toBeUndefined();
+    picoReset.webUsb = false;
+    try {
+      expect(sessionResetHook(dialog, defaultLocalize, "rp2", 115200)).toBeUndefined();
+    } finally {
+      picoReset.webUsb = true;
+    }
+  });
+
+  it("supports only the Pico's own CDC port, not a UART bridge", () => {
+    const hook = sessionResetHook(stubDialog() as never, defaultLocalize, "rp2", 115200)!;
+    expect(hook.supports(openPort({ usbVendorId: 0x2e8a, usbProductId: 0xf00a }))).toBe(
+      true
+    );
+    expect(hook.supports(openPort({ usbVendorId: 0x1a86, usbProductId: 0x7523 }))).toBe(
+      false
+    );
+    // A Raspberry Pi Debug Probe is a bridge too, despite the vendor id.
+    expect(hook.supports(openPort({ usbVendorId: 0x2e8a, usbProductId: 0x000c }))).toBe(
+      false
+    );
+    expect(hook.supports(openPort({}))).toBe(false);
+  });
+
+  it("stays quiet when the dialog closed during the reset", async () => {
+    const dialog = stubDialog();
+    picoReset.rebootPico.mockResolvedValue(false);
+    await runHook(dialog, true, 115200);
+    expect(dialog.setSerialOpenFailed).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("only toasts a stranding once the dialog closed, leaving newer sessions alone", async () => {
+    const dialog = stubDialog();
+    picoReset.rebootPico.mockRejectedValue(new PicoStrandedError("pick"));
+    await runHook(dialog, true, 115200);
+    expect(dialog.setSerialOpenFailed).not.toHaveBeenCalled();
+    expect(toastError).toHaveBeenCalledWith(
+      defaultLocalize("dashboard.logs_rp2_reset_stranded"),
+      expect.anything()
+    );
+  });
+
+  it("closes a port reopened for a session that is gone", async () => {
+    const dialog = stubDialog();
+    const live = openPort();
+    picoReset.rebootPico.mockResolvedValue(true);
+    reacquire.openLiveSerialPort.mockResolvedValueOnce(live);
+    await runHook(dialog, true, 115200);
+    expect(live.close).toHaveBeenCalledOnce();
+    expect(dialog.setSerialStream).not.toHaveBeenCalled();
+  });
+
+  it("streams the reopened port after the reboot", async () => {
+    const dialog = stubDialog();
+    const closed = deadPort();
+    const live = openPort();
+    picoReset.rebootPico.mockResolvedValue(true);
+    reacquire.openLiveSerialPort.mockResolvedValueOnce(live);
+    await runHook(dialog, false, 9600, closed);
+    expect(picoReset.rebootPico).toHaveBeenCalledWith(closed, expect.any(Function));
+    // The hook reopens the re-enumerated port itself, at the logs baud.
+    expect(reacquire.openLiveSerialPort).toHaveBeenCalledWith(closed, {
+      baudRate: 9600,
+      cancelled: expect.any(Function),
+    });
+    expect(dialog.setSerialStream).toHaveBeenCalledWith(live, expect.any(Function));
+    // The port came back open, so no DTR/RTS clear (a Pico needs DTR high).
+    expect(live.setSignals).not.toHaveBeenCalled();
+  });
+
+  it("names the stranded Pico when the reboot could not be sent", async () => {
+    const dialog = stubDialog();
+    picoReset.rebootPico.mockRejectedValue(
+      new PicoStrandedError("reboot", new Error("x"))
+    );
+    await runHook(dialog, false, 115200);
+    const message = defaultLocalize("dashboard.logs_rp2_reset_stranded");
+    expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith(message);
+    expect(toastError).toHaveBeenCalledWith(message, expect.anything());
+  });
+
+  it("names the udev rule when WebUSB refused the bootloader", async () => {
+    const dialog = stubDialog();
+    picoReset.rebootPico.mockRejectedValue(
+      new PicoStrandedError(
+        "refused",
+        new DOMException("Access denied.", "SecurityError")
+      )
+    );
+    await runHook(dialog, false, 115200);
+    expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith(
+      defaultLocalize("firmware.rp2_usb_access_denied")
+    );
+  });
+
+  it("reports a failed touch as a plain reset failure", async () => {
+    const dialog = stubDialog();
+    picoReset.rebootPico.mockRejectedValue(new DOMException("gone", "NetworkError"));
+    await runHook(dialog, false, 115200);
+    expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith(
+      defaultLocalize("dashboard.logs_reset_failed")
+    );
+  });
+
+  it("reports a port that never came back, naming it", async () => {
+    const dialog = stubDialog();
+    picoReset.rebootPico.mockResolvedValue(true);
+    reacquire.openLiveSerialPort.mockResolvedValueOnce(null);
+    await runHook(dialog, false, 115200);
+    expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith(
+      defaultLocalize("dashboard.logs_port_reopen_failed", { port: "USB 303a:1001" })
+    );
+  });
+});
+
+describe("attachBleLogs with the nRF52 Bluetooth logs", () => {
+  const nrfBle = nrf52Platform.logs!.ble!;
+  const device = {} as BluetoothDevice;
+  const bleDialog = () => ({
+    ...stubDialog(),
+    setBleStream: vi.fn(),
+    triggerBleReconnect: vi.fn(),
+  });
+
+  it("registers the stream once notifications flow", async () => {
+    const dialog = bleDialog();
+    const cancel = vi.fn(async () => {});
+    bleStream.streamBleNus.mockResolvedValue(cancel);
+    await attachBleLogs(dialog as never, defaultLocalize, nrfBle, device, () => false);
+    expect(dialog.setBleStream).toHaveBeenCalledWith(cancel);
+    expect(bleStream.streamBleNus).toHaveBeenCalledWith(
+      device,
+      expect.objectContaining({ onLine: expect.any(Function) }),
+      expect.objectContaining({ attempts: 3 })
+    );
+  });
+
+  it("cancels a stream that lands after the session moved on", async () => {
+    const dialog = bleDialog();
+    const cancel = vi.fn(async () => {});
+    bleStream.streamBleNus.mockResolvedValue(cancel);
+    await attachBleLogs(dialog as never, defaultLocalize, nrfBle, device, () => true);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(dialog.setBleStream).not.toHaveBeenCalled();
+  });
+
+  it("names the wrong device when the NUS service is missing", async () => {
+    const dialog = bleDialog();
+    bleStream.streamBleNus.mockRejectedValue(new BleNusServiceNotFoundError());
+    await attachBleLogs(dialog as never, defaultLocalize, nrfBle, device, () => false);
+    const message = defaultLocalize("dashboard.logs_ble_nus_service_not_found");
+    expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith(message);
+    expect(toastError).toHaveBeenCalledWith(message, expect.anything());
+  });
+
+  it("reports a failed connect", async () => {
+    const dialog = bleDialog();
+    bleStream.streamBleNus.mockRejectedValue(new DOMException("GATT", "NetworkError"));
+    await attachBleLogs(dialog as never, defaultLocalize, nrfBle, device, () => false);
+    expect(dialog.setSerialOpenFailed).toHaveBeenCalledWith(
+      defaultLocalize("dashboard.logs_ble_nus_open_failed")
+    );
+  });
+
+  it("triggers auto-reconnect on a remote disconnect", async () => {
+    const dialog = bleDialog();
+    bleStream.streamBleNus.mockImplementation(async (_d, hooks) => {
+      hooks.onDisconnect?.();
+      return async () => {};
+    });
+    await attachBleLogs(dialog as never, defaultLocalize, nrfBle, device, () => false);
+    expect(dialog.triggerBleReconnect).toHaveBeenCalledWith(
+      defaultLocalize("dashboard.logs_ble_nus_disconnected")
+    );
+    expect(dialog.setSerialOpenFailed).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("says the disconnect in the platform's own words", async () => {
+    const dialog = bleDialog();
+    bleStream.streamBleNus.mockImplementation(async (_d, hooks) => {
+      hooks.onDisconnect?.();
+      return async () => {};
+    });
+    // A key the nRF52 support doesn't use, so a literal in attachBleLogs
+    // would fail this.
+    const other = { ...nrfBle, disconnectedKey: "dashboard.logs_reset_failed" };
+    await attachBleLogs(dialog as never, defaultLocalize, other, device, () => false);
+    expect(dialog.triggerBleReconnect).toHaveBeenCalledWith(
+      defaultLocalize("dashboard.logs_reset_failed")
+    );
+  });
+});
+
 describe("attachSerialLogStream reopen", () => {
+  // The Device Builder knows the platform, so an RP2 board keeps DTR (its CDC
+  // only transmits with it up) whatever USB ids its maker gave it.
+  it.each([
+    ["a Pico's own CDC", { usbVendorId: 0x2e8a, usbProductId: 0xf00a }, "rp2040", false],
+    [
+      "an Adafruit Feather RP2040 (maker ids)",
+      { usbVendorId: 0x239a, usbProductId: 0x80f1 },
+      "rp2040",
+      false,
+    ],
+    ["an ESP32-S3's CDC", { usbVendorId: 0x303a, usbProductId: 0x1001 }, "esp32", true],
+    ["a CH340 bridge", { usbVendorId: 0x1a86, usbProductId: 0x7523 }, "esp32", true],
+    // The policy's release wins, whatever bridge the kit sits behind.
+    [
+      "an RTL8720C kit on an unlisted bridge",
+      { usbVendorId: 0x1234, usbProductId: 1 },
+      "rtl87xx",
+      true,
+    ],
+    [
+      "a BK72xx on an unlisted adapter",
+      { usbVendorId: 0x1234, usbProductId: 1 },
+      "bk72xx",
+      true,
+    ],
+  ])(
+    "on a reopen of %s, drops DTR and RTS: %s",
+    async (_name, info, platform, released) => {
+      const live = openPort(info);
+      const restore = withGetPorts(async () => [live]);
+      try {
+        await attachSerialLogStream(
+          { ...deadPort(), getInfo: () => info } as SerialPort,
+          stubDialog() as never,
+          defaultLocalize,
+          115200,
+          () => false,
+          platform
+        );
+        if (released) expect(live.setSignals).toHaveBeenCalled();
+        else expect(live.setSignals).not.toHaveBeenCalled();
+      } finally {
+        restore();
+      }
+    }
+  );
+
   it("opens a fresh getPorts() handle when the cached one is dead (Chrome re-enum)", async () => {
     // The cached esptool handle won't reopen, but getPorts() yields a live one
     // for the same device — the auto path must recover with no picker.
@@ -224,7 +607,14 @@ describe("attachSerialLogStream reopen", () => {
     const restore = withGetPorts(async () => [live]);
     const dialog = stubDialog();
     try {
-      await attachSerialLogStream(deadPort(), dialog as never, defaultLocalize, 115200);
+      await attachSerialLogStream(
+        deadPort(),
+        dialog as never,
+        defaultLocalize,
+        115200,
+        () => false,
+        undefined
+      );
       expect(dialog.setSerialStream).toHaveBeenCalledTimes(1);
       expect(dialog.setSerialStream.mock.calls[0][0]).toBe(live); // streamed the live handle
       expect(dialog.setSerialOpenFailed).not.toHaveBeenCalled();
@@ -245,7 +635,14 @@ describe("attachSerialLogStream reopen", () => {
     const restore = withGetPorts(async () => [live]);
     const dialog = stubDialog();
     try {
-      await attachSerialLogStream(deadPort(), dialog as never, defaultLocalize, 19200);
+      await attachSerialLogStream(
+        deadPort(),
+        dialog as never,
+        defaultLocalize,
+        19200,
+        () => false,
+        undefined
+      );
       expect(live.open).toHaveBeenCalledWith({ baudRate: 19200 });
       expect(dialog.setSerialStream).toHaveBeenCalledTimes(1);
     } finally {
@@ -268,7 +665,14 @@ describe("attachSerialLogStream reopen", () => {
     ]);
     const dialog = stubDialog();
     try {
-      await attachSerialLogStream(cached, dialog as never, defaultLocalize, 115200);
+      await attachSerialLogStream(
+        cached,
+        dialog as never,
+        defaultLocalize,
+        115200,
+        () => false,
+        undefined
+      );
       expect(cached.open).toHaveBeenCalledWith({ baudRate: 115200 });
       expect(dialog.setSerialStream).toHaveBeenCalledTimes(1);
       expect(dialog.setSerialStream.mock.calls[0][0]).toBe(cached);
@@ -286,7 +690,14 @@ describe("attachSerialLogStream reopen", () => {
     const dialog = stubDialog();
     try {
       const port = deadPort(new DOMException("gone", "NetworkError"));
-      const done = attachSerialLogStream(port, dialog as never, defaultLocalize, 115200);
+      const done = attachSerialLogStream(
+        port,
+        dialog as never,
+        defaultLocalize,
+        115200,
+        () => false,
+        undefined
+      );
       await vi.advanceTimersByTimeAsync(8100);
       await done;
       expect(dialog.setSerialOpenFailed).toHaveBeenCalledTimes(1);
@@ -372,5 +783,60 @@ describe("handlePostInstallShowLogs serial baud", () => {
     await handlePostInstallShowLogs(event, dialog as never, defaultLocalize);
     expect(dialog.open).not.toHaveBeenCalled();
     expect(dialog.openPassive).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["logging is disabled", { ...detail(0) }],
+    [
+      "the port can't carry the console",
+      {
+        ...detail(115200),
+        webSerialPort: openPort({ usbVendorId: 0x1a86, usbProductId: 0x7523 }),
+        loggerInterface: "USB_SERIAL_JTAG",
+      },
+    ],
+  ])(
+    "keeps the install's notice when %s and it falls back to network logs",
+    async (_, base) => {
+      const dialog = logsDialog();
+      const event = new CustomEvent("request-show-logs-after-install", {
+        cancelable: true,
+        detail: { ...base, notice: "Reset the board" },
+      });
+      await handlePostInstallShowLogs(event, dialog as never, defaultLocalize);
+      expect(dialog.open).toHaveBeenCalledWith(
+        "OTA",
+        expect.objectContaining({ notice: "Reset the board" })
+      );
+    }
+  );
+
+  it("heads the serial logs with the install's notice", async () => {
+    const dialog = logsDialog();
+    const event = new CustomEvent("request-show-logs-after-install", {
+      cancelable: true,
+      detail: { ...detail(115200), notice: "Reset the board" },
+    });
+    await handlePostInstallShowLogs(event, dialog as never, defaultLocalize);
+    expect(dialog.openPassive).toHaveBeenCalledWith(
+      expect.objectContaining({ notice: "Reset the board" })
+    );
+  });
+
+  it.each([
+    ["rp2", "object"],
+    ["esp32", "undefined"],
+  ])("wires Reset Device for %s the way a card launch does", async (platform, kind) => {
+    const dialog = logsDialog();
+    const event = new CustomEvent("request-show-logs-after-install", {
+      cancelable: true,
+      detail: { ...detail(115200), targetPlatform: platform },
+    });
+    await handlePostInstallShowLogs(event, dialog as never, defaultLocalize);
+    expect(dialog.openPassive).toHaveBeenCalledWith(
+      expect.objectContaining({
+        onResetDevice: expect.toSatisfy((h) => typeof h === kind),
+      })
+    );
   });
 });

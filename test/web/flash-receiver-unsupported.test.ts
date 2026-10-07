@@ -5,13 +5,14 @@ vi.mock("../../src/util/web-serial.js", () => ({
   isPortPickerCancel: vi.fn(() => false),
   webSerialAvailability: vi.fn(() => "unsupported"),
 }));
-vi.mock("../../src/web/install/run-flash.js", () => ({ runFlash: vi.fn() }));
+vi.mock("../../src/web/platforms/esp/run-flash.js", () => ({ runFlash: vi.fn() }));
 vi.mock("../../src/web/dashboard/esphome-web-card.js", () => ({}));
 vi.mock("../../src/web/dashboard/esphome-web-unsupported-card.js", () => ({}));
 vi.mock("@home-assistant/webawesome/dist/components/spinner/spinner.js", () => ({}));
 vi.mock("../../src/components/ansi-log.js", () => ({}));
 vi.mock("sonner-js", () => ({ default: { error: vi.fn() } }));
-vi.mock("../../src/web/logs/esphome-web-logs-dialog.js", () => ({
+vi.mock("../../src/web/logs/esphome-web-logs-dialog.js", () => ({}));
+vi.mock("../../src/web/logs/open-port-for-logs.js", () => ({
   openPortForLogs: vi.fn(async () => true),
 }));
 

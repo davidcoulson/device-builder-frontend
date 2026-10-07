@@ -1,13 +1,11 @@
 import type { BoardCatalogEntry } from "../../api/types/boards.js";
 import type { ConfigEntry, RequiredGroup } from "../../api/types/config-entries.js";
-import { isEntryVisible } from "../../util/config-validation.js";
 import { buildFormRenderPlan, planNeedsUserInput } from "./config-entry-form-plan.js";
 import {
   collectRenderablePaths,
   renderFilterOptions,
   type RenderFilterOptions,
 } from "./config-entry-render-filter.js";
-import { collectUnsatisfiedConstraints } from "./config-entry-renderers/constraint-banners.js";
 
 /**
  * The add-component form's fixed render filter: required-only, no advanced
@@ -38,14 +36,35 @@ function addFormFilterOptions(
 export function addFormRenderablePaths(
   entries: ConfigEntry[],
   values: Record<string, unknown>,
+  requiredGroups: RequiredGroup[],
   board: BoardCatalogEntry | null,
   presentComponents: ReadonlySet<string>
 ): Set<string> {
-  return collectRenderablePaths(
+  return collectRenderablePaths(entries, values, {
+    ...addFormFilterOptions(values, board, presentComponents),
+    requiredGroups,
+  });
+}
+
+/**
+ * Whether an unmet constraint should hold the Add button. Only one the user
+ * can act on here counts: a member the required-only paint drops (an
+ * advanced leaf, a NESTED block with no field and nothing for its enable
+ * switch to write) must not leave the component impossible to add.
+ */
+export function addFormHasUnsatisfiedConstraint(
+  entries: ConfigEntry[],
+  values: Record<string, unknown>,
+  requiredGroups: RequiredGroup[],
+  board: BoardCatalogEntry | null,
+  presentComponents: ReadonlySet<string>
+): boolean {
+  return buildFormRenderPlan(
     entries,
     values,
+    requiredGroups,
     addFormFilterOptions(values, board, presentComponents)
-  );
+  ).unmet.some((constraint) => constraint.actionable);
 }
 
 /**
@@ -64,34 +83,12 @@ export function addFormNeedsUserInput(
   board: BoardCatalogEntry | null,
   presentComponents: ReadonlySet<string>
 ): boolean {
-  const opts = addFormFilterOptions(values, board, presentComponents);
-  const plan = buildFormRenderPlan(entries, values, requiredGroups, opts);
-  // Group/cluster members are unfiltered in the plan; gate them on the same
-  // visibility the form uses so a hidden unlocked member can't keep the form
-  // open when every rendered field is board-locked.
-  const isVisible = (entry: ConfigEntry): boolean =>
-    isEntryVisible(
-      entry,
-      values,
-      opts.presentComponents,
-      opts.targetPlatform ?? null,
-      opts.rootValues,
-      entries
-    );
-  if (planNeedsUserInput(plan, isVisible)) return true;
-  // Pure-cardinality groups with no cluster box surface a banner only when
-  // unsatisfied; keys are irrelevant to presence, so format to "".
-  return (
-    collectUnsatisfiedConstraints(
-      {
-        entries,
-        requiredGroups,
-        values,
-        presentComponents,
-        targetPlatform: opts.targetPlatform ?? null,
-        formatKeys: () => "",
-      },
-      plan.memberKeys
-    ).length > 0
+  const plan = buildFormRenderPlan(
+    entries,
+    values,
+    requiredGroups,
+    addFormFilterOptions(values, board, presentComponents)
   );
+  // Any unmet prompt keeps the form open, actionable or not, so the user sees it.
+  return planNeedsUserInput(plan) || plan.unmet.length > 0;
 }

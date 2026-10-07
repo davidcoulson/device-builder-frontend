@@ -15,8 +15,12 @@ import {
   type ConfigEntry,
   ConfigEntryType,
 } from "../../../src/api/types/config-entries.js";
+import type { RenderCtx } from "../../../src/components/device/config-entry-renderers-shared.js";
 import { renderNestedField } from "../../../src/components/device/config-entry-renderers.js";
-import { onEnableToggle } from "../../../src/components/device/config-entry-renderers/nested.js";
+import {
+  clearEnableStash,
+  onEnableToggle,
+} from "../../../src/components/device/config-entry-renderers/nested.js";
 import { makeConfigEntry } from "../../../src/util/config-entry-defaults.js";
 import { getIn, setIn } from "../../../src/util/nested-values.js";
 import { findElementBindings, makeRenderCtx } from "./_renderer-fixtures.js";
@@ -50,6 +54,8 @@ function makeInitialStateEntry(): ConfigEntry {
 
 const switchesOf = (tpl: unknown) => findElementBindings(tpl, "wa-switch");
 
+const DEMANDS = [{ kind: "exactly_one" as const, keys: ["pwm", "dac"] }];
+
 describe("renderNestedField enable switch", () => {
   it("renders the switch for an optional entity sub-reading", () => {
     const tpl = renderNestedField(makeSensorEntry(), ["min_free"], makeRenderCtx({}));
@@ -61,6 +67,50 @@ describe("renderNestedField enable switch", () => {
     expect(
       switchesOf(renderNestedField(entry, ["min_free"], makeRenderCtx({})))
     ).toHaveLength(0);
+  });
+
+  it("renders the switch for a plain block a required group demands", () => {
+    const entry = makeSensorEntry({
+      key: "pwm",
+      platform_type: null,
+      config_entries: [
+        makeConfigEntry({
+          key: "divider",
+          type: ConfigEntryType.INTEGER,
+          default_value: "1",
+        }),
+      ],
+    });
+    const ctx = makeRenderCtx({}, { overrides: { requiredGroups: DEMANDS } });
+    expect(switchesOf(renderNestedField(entry, ["pwm"], ctx))).toHaveLength(1);
+  });
+
+  it("omits it when the demanded block has nothing to write", () => {
+    const entry = makeSensorEntry({
+      key: "pwm",
+      platform_type: null,
+      config_entries: [
+        makeConfigEntry({ key: "divider", type: ConfigEntryType.INTEGER }),
+      ],
+    });
+    const ctx = makeRenderCtx({}, { overrides: { requiredGroups: DEMANDS } });
+    expect(switchesOf(renderNestedField(entry, ["pwm"], ctx))).toHaveLength(0);
+  });
+
+  it("keeps a set block with no paintable field collapsed across renders", () => {
+    const entry = makeSensorEntry({ key: "pwm" });
+    const ctx = makeRenderCtx(
+      { pwm: { name: "PWM" } },
+      { overrides: { filterRenderable: () => [] } }
+    );
+    renderNestedField(entry, ["pwm"], ctx);
+    expect(ctx.seedNestedOpen).not.toHaveBeenCalled();
+  });
+
+  it("omits it for a same-named block below the top level", () => {
+    const entry = makeSensorEntry({ key: "pwm", platform_type: null });
+    const ctx = makeRenderCtx({}, { overrides: { requiredGroups: DEMANDS } });
+    expect(switchesOf(renderNestedField(entry, ["fan", "pwm"], ctx))).toHaveLength(0);
   });
 
   it("omits the switch for a required entity group", () => {
@@ -180,6 +230,37 @@ describe("onEnableToggle", () => {
     expect(ctx.emitChange).toHaveBeenLastCalledWith(["min_free"], configured);
   });
 
+  it("seeds afresh once the owner's stash is cleared on a re-target", () => {
+    let values: Record<string, unknown> = { min_free: { name: "Custom" } };
+    const ctx = makeRenderCtx(
+      {},
+      {
+        overrides: {
+          emitChange: vi.fn((path: string[], value: unknown) => {
+            values = setIn(values, path, value);
+          }),
+          getAt: (path: string[]) => getIn(values, path),
+        },
+      }
+    );
+    const toggle = (checked: boolean) =>
+      onEnableToggle({
+        entry: makeSensorEntry(),
+        path: ["min_free"],
+        key: "min_free",
+        isOpen: true,
+        checked,
+        label: "Min Free",
+        ctx,
+      });
+
+    toggle(false);
+    clearEnableStash(ctx.stashOwner);
+    toggle(true);
+
+    expect(getIn(values, ["min_free"])).toEqual({ name: "Min Free" });
+  });
+
   it("seeds a unique id when the group has no name field (#2459)", () => {
     // pipsolar's output sub-entities reject ``name:`` and require an id.
     const entry = makeConfigEntry({
@@ -241,6 +322,306 @@ describe("onEnableToggle", () => {
       ctx,
     });
     expect(ctx.emitChange).toHaveBeenCalledWith(["t_set", "id"], "t_set_1");
+  });
+
+  it("seeds a child's own default when the block has no name or id", () => {
+    // emc2101's pwm: only defaulted tuning fields, none of them identity.
+    const entry = makeSensorEntry({
+      key: "pwm",
+      platform_type: null,
+      config_entries: [
+        makeConfigEntry({
+          key: "divider",
+          type: ConfigEntryType.INTEGER,
+          default_value: "1",
+        }),
+      ],
+    });
+    const ctx = makeRenderCtx({}, { overrides: { requiredGroups: DEMANDS } });
+    onEnableToggle({
+      entry,
+      path: ["pwm"],
+      key: "pwm",
+      isOpen: false,
+      checked: true,
+      label: "PWM",
+      ctx,
+    });
+    expect(ctx.emitChange).toHaveBeenCalledWith(["pwm", "divider"], "1");
+  });
+
+  it("keeps the no-op for an undemanded entity block that only has a defaulted child", () => {
+    const entry = makeSensorEntry({
+      key: "level",
+      config_entries: [
+        makeConfigEntry({
+          key: "accuracy_decimals",
+          type: ConfigEntryType.INTEGER,
+          default_value: "1",
+        }),
+      ],
+    });
+    const ctx = makeRenderCtx({});
+    onEnableToggle({
+      entry,
+      path: ["level"],
+      key: "level",
+      isOpen: false,
+      checked: true,
+      label: "Level",
+      ctx,
+    });
+    expect(ctx.emitChange).toHaveBeenCalledWith(["level"], undefined);
+  });
+
+  it("never seeds the label into a plain block's name", () => {
+    // Only an entity's ``name`` is a display label.
+    const entry = makeSensorEntry({ key: "pwm", platform_type: null });
+    const ctx = makeRenderCtx({});
+    onEnableToggle({
+      entry,
+      path: ["pwm"],
+      key: "pwm",
+      isOpen: false,
+      checked: true,
+      label: "PWM",
+      ctx,
+    });
+    expect(ctx.emitChange).toHaveBeenCalledWith(["pwm"], undefined);
+  });
+
+  it("never seeds a reference child's default", () => {
+    const entry = makeSensorEntry({
+      key: "pwm",
+      platform_type: null,
+      config_entries: [
+        makeConfigEntry({
+          key: "output_id",
+          type: ConfigEntryType.STRING,
+          default_value: "out_1",
+          references_component: "output",
+        }),
+      ],
+    });
+    const ctx = makeRenderCtx({});
+    onEnableToggle({
+      entry,
+      path: ["pwm"],
+      key: "pwm",
+      isOpen: false,
+      checked: true,
+      label: "PWM",
+      ctx,
+    });
+    expect(ctx.emitChange).toHaveBeenCalledWith(["pwm"], undefined);
+  });
+
+  it("renders a block with no paintable field closed even when marked open", () => {
+    const entry = makeSensorEntry({ key: "pwm" });
+    const open = { nestedOpenSections: new Set(["pwm"]) };
+    const body = (overrides: Partial<RenderCtx>) =>
+      JSON.stringify(
+        renderNestedField(entry, ["pwm"], makeRenderCtx({}, { overrides }))
+      ).includes("nested-fields");
+    expect(body(open)).toBe(true);
+    expect(body({ ...open, filterRenderable: () => [] })).toBe(false);
+  });
+
+  it("says what an enabled block with no field to show holds", () => {
+    const entry = makeSensorEntry({
+      key: "pwm",
+      platform_type: null,
+      config_entries: [
+        makeConfigEntry({ key: "divider", label: "Divider", default_value: "1" }),
+      ],
+    });
+    const shown = (values: Record<string, unknown>) =>
+      JSON.stringify(
+        renderNestedField(
+          entry,
+          ["pwm"],
+          makeRenderCtx(values, {
+            overrides: { filterRenderable: () => [], requiredGroups: DEMANDS },
+          })
+        )
+      ).includes("device.enabled_block_sets");
+    expect(shown({ pwm: { divider: "1" } })).toBe(true);
+    expect(shown({})).toBe(false);
+    // Only nested values: nothing primitive to name, so no bare label.
+    expect(shown({ pwm: { curve: { a: 1 } } })).toBe(false);
+    // The sentence itself names the child by its label.
+    const spoken = JSON.stringify(
+      renderNestedField(
+        entry,
+        ["pwm"],
+        makeRenderCtx(
+          { pwm: { divider: "1" } },
+          {
+            overrides: {
+              filterRenderable: () => [],
+              requiredGroups: DEMANDS,
+              localize: (key: string, params?: Record<string, unknown>) =>
+                params?.values ? `${key}|${String(params.values)}` : key,
+            },
+          }
+        )
+      )
+    );
+    expect(spoken).toContain("device.enabled_block_sets|Divider: 1");
+  });
+
+  it("hands the toggle the raw open state of a fieldless block, so off collapses it", () => {
+    const entry = makeSensorEntry({ key: "pwm" });
+    const ctx = makeRenderCtx(
+      { pwm: { name: "PWM" } },
+      {
+        overrides: {
+          filterRenderable: () => [],
+          nestedOpenSections: new Set(["pwm"]),
+        },
+      }
+    );
+    const [sw] = switchesOf(renderNestedField(entry, ["pwm"], ctx));
+    (sw["@change"] as (e: Event) => void)({
+      target: { checked: false },
+    } as unknown as Event);
+    expect(ctx.toggleNested).toHaveBeenCalledWith("pwm");
+  });
+
+  it("names a seeded child the form drops even when the block paints other fields", () => {
+    const divider = makeConfigEntry({
+      key: "divider",
+      label: "Divider",
+      advanced: true,
+      default_value: "1",
+    });
+    const mode = makeConfigEntry({ key: "mode", label: "Mode", required: true });
+    const entry = makeSensorEntry({
+      key: "pwm",
+      platform_type: null,
+      config_entries: [divider, mode],
+    });
+    const spoken = JSON.stringify(
+      renderNestedField(
+        entry,
+        ["pwm"],
+        makeRenderCtx(
+          { pwm: { divider: "1", mode: "fast" } },
+          {
+            overrides: {
+              filterRenderable: () => [mode],
+              requiredGroups: DEMANDS,
+              localize: (key: string, params?: Record<string, unknown>) =>
+                params?.values ? `${key}|${String(params.values)}` : key,
+            },
+          }
+        )
+      )
+    );
+    expect(spoken).toContain("device.enabled_block_sets|Divider: 1");
+    expect(spoken).not.toContain("Mode: fast");
+  });
+
+  it("says nothing for an ordinary enabled entity block whose fields are painted", () => {
+    const entry = makeSensorEntry({ key: "temperature" });
+    const spoken = JSON.stringify(
+      renderNestedField(
+        entry,
+        ["temperature"],
+        makeRenderCtx({ temperature: { name: "Temp" } })
+      )
+    );
+    expect(spoken).not.toContain("device.enabled_block_sets");
+  });
+
+  it("masks a secure child's value in the summary of what a block holds", () => {
+    const entry = makeSensorEntry({
+      key: "auth",
+      platform_type: null,
+      config_entries: [
+        makeConfigEntry({ key: "username", label: "Username", default_value: "admin" }),
+        makeConfigEntry({
+          key: "password",
+          label: "Password",
+          type: ConfigEntryType.SECURE_STRING,
+        }),
+        // Declared, but typed as a plain string: the spelling still masks it.
+        makeConfigEntry({ key: "ap_password", label: "AP password" }),
+      ],
+    });
+    const spoken = JSON.stringify(
+      renderNestedField(
+        entry,
+        ["auth"],
+        makeRenderCtx(
+          {
+            auth: {
+              username: "admin",
+              password: "hunter2",
+              ota_password: 's3cret # tail"quoted',
+              ap_password: "0pen",
+            },
+          },
+          {
+            overrides: {
+              filterRenderable: () => [],
+              requiredGroups: [{ kind: "at_least_one", keys: ["auth"] }],
+              localize: (key: string, params?: Record<string, unknown>) =>
+                params?.values ? `${key}|${String(params.values)}` : key,
+            },
+          }
+        )
+      )
+    );
+    expect(spoken).toContain("Username: admin");
+    expect(spoken).toContain("Password: ••••••");
+    expect(spoken).not.toContain("hunter2");
+    // A credential under a key the catalog does not declare is masked too.
+    expect(spoken).toContain("ota_password: ••••••");
+    expect(spoken).not.toContain("s3cret");
+    // A comment character or a quote in the value can't leak its tail.
+    expect(spoken).not.toContain("tail");
+    expect(spoken).toContain("AP password: ••••••");
+    expect(spoken).not.toContain("0pen");
+  });
+
+  it("masks a key that is only a credential under its parent block", () => {
+    // ``key:`` is a secret under ``encryption:``; the masker needs that parent.
+    const entry = makeSensorEntry({
+      key: "encryption",
+      platform_type: null,
+      config_entries: [makeConfigEntry({ key: "mode", default_value: "noise" })],
+    });
+    const spoken = JSON.stringify(
+      renderNestedField(
+        entry,
+        ["encryption"],
+        makeRenderCtx(
+          { encryption: { mode: "noise", key: "c2VjcmV0" } },
+          {
+            overrides: {
+              filterRenderable: () => [],
+              requiredGroups: [{ kind: "at_least_one", keys: ["encryption"] }],
+              localize: (key: string, params?: Record<string, unknown>) =>
+                params?.values ? `${key}|${String(params.values)}` : key,
+            },
+          }
+        )
+      )
+    );
+    expect(spoken).toContain("key: ••••••");
+    expect(spoken).not.toContain("c2VjcmV0");
+  });
+
+  it("drops the disclosure button from a block with no field to expand", () => {
+    const entry = makeSensorEntry({ key: "pwm" });
+    const buttons = (overrides: Partial<RenderCtx>) =>
+      findElementBindings(
+        renderNestedField(entry, ["pwm"], makeRenderCtx({}, { overrides })),
+        "button"
+      );
+    expect(buttons({})).toHaveLength(1);
+    expect(buttons({ filterRenderable: () => [] })).toHaveLength(0);
   });
 
   it("writes no field when the schema offers neither a name nor an id", () => {

@@ -13,14 +13,15 @@ import { APIError, CommandTimeoutError } from "./api-error.js";
 import { LivenessMonitor } from "./liveness.js";
 import type {
   AutomationAction,
+  AutomationBodyRef,
   AutomationCatalogBody,
-  AutomationCatalogBodyType,
   AutomationCondition,
   AutomationLocation,
   AutomationTree,
   AutomationTrigger,
   AvailableAutomations,
   Filter,
+  GetAutomationBodiesResponse,
   LightEffect,
   ParsedAutomation,
   YamlDiff,
@@ -1034,8 +1035,8 @@ export class ESPHomeAPI {
    *
    *  Returns the new configuration filename. ``CommandError(INVALID_ARGS)``
    *  surfaces user-correctable failures (collision, empty / equal
-   *  name, missing source) so the dialog can show a specific
-   *  message.
+   *  name) and NOT_FOUND a missing source, so the dialog can show a
+   *  specific message.
    */
   async cloneDevice(
     configuration: string,
@@ -1066,9 +1067,9 @@ export class ESPHomeAPI {
    *  install in that case.
    *
    *  ``CommandError(INVALID_ARGS)`` surfaces user-correctable
-   *  failures (blank name, missing device, package-driven
-   *  friendly_name with no inline leaf) so the dialog can show a
-   *  specific message.
+   *  failures (blank name, package-driven friendly_name with no
+   *  inline leaf) and NOT_FOUND a missing device, so the dialog can
+   *  show a specific message.
    */
   async editFriendlyName(
     configuration: string,
@@ -1442,6 +1443,12 @@ export class ESPHomeAPI {
     return this.sendCommand<FirmwareJob>("firmware/clean", { configuration });
   }
 
+  /** Queue ``esphome analyze-memory`` for a device (compiles, then reports
+   *  flash / RAM use per component into the job output). */
+  async firmwareAnalyzeMemory(configuration: string): Promise<FirmwareJob> {
+    return this.sendCommand<FirmwareJob>("firmware/analyze_memory", { configuration });
+  }
+
   /** Queue a reset-build-environment job (wipes the toolchain cache). */
   async firmwareResetBuildEnv(): Promise<FirmwareJob> {
     return this.sendCommand<FirmwareJob>("firmware/reset_build_env");
@@ -1598,7 +1605,7 @@ export class ESPHomeAPI {
     boardId?: string
   ): Promise<Record<string, ComponentCatalogEntry>> {
     if (componentIds.length === 0) return {};
-    return this.sendCommand<Record<string, ComponentCatalogEntry>>(
+    const bodies = await this.sendCommand<Record<string, ComponentCatalogEntry>>(
       "components/get_component_bodies",
       {
         component_ids: componentIds,
@@ -1606,6 +1613,10 @@ export class ESPHomeAPI {
         ...(boardId ? { board_id: boardId } : {}),
       }
     );
+    // A component with no fields arrives without 'config_entries' (the
+    // backend omits defaults); consumers read the list directly.
+    for (const body of Object.values(bodies)) body.config_entries ??= [];
+    return bodies;
   }
 
   /**
@@ -1775,23 +1786,34 @@ export class ESPHomeAPI {
   }
 
   /**
-   * Hydrate full automation bodies (config_entries trees) in one
-   * round trip. Each ref is ``{type, id}`` where ``type`` is one of
-   * ``triggers`` / ``actions`` / ``conditions`` / ``light_effects``
-   * / ``filters``. The response is keyed by ``"<type>/<id>"`` and
+   * Hydrate full automation bodies (config_entries trees), following
+   * the backend's ``remaining`` pages until done. Each ref is
+   * ``{type, id}`` where ``type`` is one of ``triggers`` /
+   * ``actions`` / ``conditions`` / ``light_effects`` /
+   * ``filters``. The response is keyed by ``"<type>/<id>"`` and
    * carries the full body. Missing / unknown refs are absent.
    * Callers should go through ``automation-body-cache.ts`` rather
    * than calling this directly; it caches results and coalesces
    * concurrent fetches into one batched call.
    */
   async getAutomationBodies(
-    refs: { type: AutomationCatalogBodyType; id: string }[]
+    refs: AutomationBodyRef[]
   ): Promise<Record<string, AutomationCatalogBody>> {
-    if (refs.length === 0) return {};
-    return this.sendCommand<Record<string, AutomationCatalogBody>>(
-      "automations/get_bodies",
-      { refs }
-    );
+    const bodies: Record<string, AutomationCatalogBody> = {};
+    for (let todo = refs; todo.length > 0;) {
+      const page = await this.sendCommand<GetAutomationBodiesResponse>(
+        "automations/get_bodies",
+        { refs: todo }
+      );
+      Object.assign(bodies, page.bodies);
+      if (page.remaining.length >= todo.length) {
+        console.warn("automations/get_bodies made no progress; dropping refs", todo);
+        break;
+      }
+      todo = page.remaining;
+    }
+    for (const body of Object.values(bodies)) body.config_entries ??= [];
+    return bodies;
   }
 
   /**
@@ -1832,6 +1854,8 @@ export class ESPHomeAPI {
     for (const e of raw.triggers) e.config_entries ??= [];
     for (const e of raw.actions) e.config_entries ??= [];
     for (const e of raw.conditions) e.config_entries ??= [];
+    // A script's empty parameter list is omitted from the wire the same way.
+    for (const s of raw.scripts) s.parameters ??= [];
     return raw;
   }
 

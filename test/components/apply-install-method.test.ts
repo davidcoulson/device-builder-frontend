@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PLATFORM_INSTALLS } from "../_platform-installs.js";
 import type { ConfiguredDevice } from "../../src/api/types/devices.js";
 import { applyInstallMethod } from "../../src/components/apply-install-method.js";
 import type { ESPHomeFirmwareInstallDialog } from "../../src/components/firmware-install-dialog.js";
@@ -10,6 +11,7 @@ function deps() {
     installWebSerial: vi.fn(),
     installUsbFlash: vi.fn(),
     installBinaryDownload: vi.fn(),
+    installBrowserFlasher: vi.fn(),
   } as unknown as ESPHomeFirmwareInstallDialog;
   return { device, openInstall: vi.fn(), firmwareDialog };
 }
@@ -52,6 +54,26 @@ describe("applyInstallMethod", () => {
     expect(d.firmwareDialog.installUsbFlash).toHaveBeenCalledWith(device);
     expect(d.openInstall).not.toHaveBeenCalled();
     expect(d.firmwareDialog.installWebSerial).not.toHaveBeenCalled();
+  });
+
+  it.each(PLATFORM_INSTALLS.map((f) => [f.id, f] as const))(
+    "%s routes to the dialog's browser flasher",
+    (id, flasher) => {
+      const d = deps();
+      applyInstallMethod(id, undefined, d);
+      expect(d.firmwareDialog.installBrowserFlasher).toHaveBeenCalledWith(
+        flasher,
+        device
+      );
+      expect(d.openInstall).not.toHaveBeenCalled();
+    }
+  );
+
+  it("ignores a method nothing handles", () => {
+    const d = deps();
+    applyInstallMethod("carrier-pigeon", undefined, d);
+    expect(d.firmwareDialog.installBrowserFlasher).not.toHaveBeenCalled();
+    expect(d.openInstall).not.toHaveBeenCalled();
   });
 
   it("binary-download routes to the firmware dialog", () => {

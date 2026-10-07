@@ -3,15 +3,20 @@ import type { ConfiguredDevice } from "../api/types/devices.js";
 import { OTA_PORT } from "../api/types/streaming.js";
 import type { LocalizeFunc } from "../common/localize.js";
 import type { ESPHomeLogsDialog } from "../components/logs-dialog.js";
+import { platformFor } from "../platforms/registry.js";
 import { resolveLogBaudRate } from "./log-baud-rate.js";
 import { notifyError, notifyInfo } from "./notify.js";
 import {
+  attachBleLogs,
   attachSerialLogStream,
   openNetworkLogsFallback,
+  openPortForLogs,
   reconnectWebSerialLogs,
-  requestSerialPort,
+  sessionResetHook,
 } from "./post-install-logs.js";
 import { serialConsoleMismatch } from "./serial-console-match.js";
+import { openFailureMessage } from "./serial-open-error.js";
+import { requestSerialPort } from "./web-serial.js";
 
 /** The host bits both logs entry points need, decoupled from any page class. */
 export interface LogsLaunchHost {
@@ -28,7 +33,7 @@ const SERIAL_PORT_PROBE_TIMEOUT_MS = 2500;
  * Open live logs, offering the OTA-vs-serial picker when a serial path exists.
 
  * ``openMethodPicker`` is invoked (host wires the picker in its logs mode) when
- * WebSerial or a server serial port is available; otherwise OTA logs open
+ * WebSerial, a server serial port or Bluetooth logs are available; otherwise OTA logs open
  * directly. Online/offline state is intentionally not consulted (#525).
  */
 export async function launchLogs(
@@ -37,6 +42,7 @@ export async function launchLogs(
   openMethodPicker: () => void
 ): Promise<void> {
   const hasWebSerial = "serial" in navigator;
+  const hasBleLogs = platformFor(device.target_platform)?.logs?.ble?.available() ?? false;
   let hasServerPorts = false;
   if (!hasWebSerial) {
     // Only pay the backend round-trip when WebSerial can't already provide a
@@ -56,7 +62,7 @@ export async function launchLogs(
       hasServerPorts = false;
     }
   }
-  if (hasWebSerial || hasServerPorts) {
+  if (hasWebSerial || hasServerPorts || hasBleLogs) {
     openMethodPicker();
     return;
   }
@@ -103,10 +109,12 @@ export async function launchLogsWithMethod(
     let serialPort: SerialPort | null;
     try {
       serialPort = await requestSerialPort();
-    } catch {
+    } catch (err) {
       // A real requestPort failure; unlike a picker dismissal this needs
       // feedback.
-      notifyError(host.localize("dashboard.logs_web_serial_open_failed"));
+      notifyError(
+        openFailureMessage(err, host.localize, "dashboard.logs_web_serial_open_failed")
+      );
       return;
     }
     if (!serialPort) return; // User dismissed the port picker.
@@ -127,29 +135,65 @@ export async function launchLogsWithMethod(
       return;
     }
     try {
-      await serialPort.open({ baudRate });
-    } catch {
+      await openPortForLogs(serialPort, baudRate, device.target_platform);
+    } catch (err) {
       // The port couldn't open (claimed by another tab, driver error).
-      notifyError(host.localize("dashboard.logs_web_serial_open_failed"));
+      notifyError(openFailureMessage(err, host.localize));
       return;
     }
     // Reconnect (the dialog's "click Start to reconnect") re-acquires a fresh
     // port via the picker — the cached handle can be dead after a device reset.
-    host.logsDialog.openPassive({
-      onReconnect: () =>
+    const cancelled = host.logsDialog.openPassive({
+      onReconnect: (cancelled) =>
         reconnectWebSerialLogs(
           host.logsDialog,
           host.localize,
           baudRate,
-          device.logger_interface
+          device.logger_interface,
+          cancelled,
+          device.target_platform
         ),
+      onResetDevice: sessionResetHook(
+        host.logsDialog,
+        host.localize,
+        device.target_platform,
+        baudRate
+      ),
     });
     // attach toasts the reopen-retry failure itself; cover any other rejection
     // so it can't escape this fire-and-forget call as an unhandled rejection.
     try {
-      await attachSerialLogStream(serialPort, host.logsDialog, host.localize, baudRate);
+      await attachSerialLogStream(
+        serialPort,
+        host.logsDialog,
+        host.localize,
+        baudRate,
+        cancelled,
+        device.target_platform
+      );
     } catch {
       notifyError(host.localize("dashboard.logs_web_serial_open_failed"));
+    }
+  } else if (method === "ble-nus") {
+    const ble = platformFor(device.target_platform)?.logs?.ble;
+    if (!ble) return;
+    // The firmware advertises the node name; the friendly name is a guess.
+    const bleDevice = await ble.pick(host.localize, [device.name, device.friendly_name]);
+    if (!bleDevice) return;
+    host.logsDialog.configuration = device.configuration;
+    host.logsDialog.name = device.friendly_name || device.name;
+    const cancelled = host.logsDialog.openPassive({
+      source: "ble",
+      onReconnect: (cancelled) =>
+        attachBleLogs(host.logsDialog, host.localize, ble, bleDevice, cancelled),
+    });
+    // attach reports its own failures; cover any other rejection so it can't
+    // escape this fire-and-forget call as an unhandled rejection.
+    try {
+      await attachBleLogs(host.logsDialog, host.localize, ble, bleDevice, cancelled);
+    } catch (err) {
+      console.warn("Bluetooth logs attach failed", err);
+      notifyError(host.localize(ble.failureKey(err)));
     }
   }
 }

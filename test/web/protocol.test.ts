@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { isFlashParts } from "../../src/web/flash-receiver/protocol.js";
+import {
+  handoffLogBaudRateOf,
+  isFlashParts,
+  isHandoffFlasher,
+} from "../../src/web/flash-receiver/protocol.js";
 
 const part = (address = 0, bytes = 8) => ({ address, data: new ArrayBuffer(bytes) });
 
@@ -39,4 +43,32 @@ describe("isFlashParts", () => {
     const big = 40 * 1024 * 1024;
     expect(isFlashParts([part(0, big), part(0x1000, big)])).toBe(false);
   });
+});
+
+describe("isHandoffFlasher", () => {
+  it("takes the ids this build knows and nothing inherited or foreign", () => {
+    expect(isHandoffFlasher("esp")).toBe(true);
+    expect(isHandoffFlasher("rtl-ambz2")).toBe(true);
+    expect(isHandoffFlasher("rp2-picoboot")).toBe(true);
+    expect(isHandoffFlasher("nrf-dfu")).toBe(true);
+    expect(isHandoffFlasher("bk-uart")).toBe(true);
+    expect(isHandoffFlasher("ln-uart")).toBe(true);
+    expect(isHandoffFlasher("rtl-ambz")).toBe(true);
+    expect(isHandoffFlasher("rtl-ambz1")).toBe(false);
+    expect(isHandoffFlasher("toString")).toBe(false);
+    expect(isHandoffFlasher(undefined)).toBe(false);
+  });
+});
+
+describe("handoffLogBaudRateOf", () => {
+  it.each([9600, 115200])("takes the plausible UART baud %s", (value) => {
+    expect(handoffLogBaudRateOf(value)).toBe(value);
+  });
+
+  it.each([undefined, null, "9600", 0, -9600, 9600.5, 10_000_000])(
+    "ignores %s from the untrusted frame",
+    (value) => {
+      expect(handoffLogBaudRateOf(value)).toBeUndefined();
+    }
+  );
 });

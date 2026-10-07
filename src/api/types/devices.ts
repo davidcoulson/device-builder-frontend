@@ -33,6 +33,13 @@ export interface DeviceRuntimeState {
    *  the device is seen online. ``ip_addresses[0]`` matches the flat
    *  ``ip`` when populated. */
   ip_addresses: string[];
+  /** Seconds the device had been unreachable when this was sent; ``null``
+   *  while online or unknown. An age, so the server's clock is never
+   *  measured against the browser's. */
+  offline_seconds: number | null;
+  /** Not on the wire: ``offline_seconds`` anchored to the browser clock on
+   *  receipt, as epoch seconds (``anchorOffline``). */
+  offline_since?: number | null;
   deployed_version: string;
   /**
    * 8-char hex hash the running firmware reports via the
@@ -109,6 +116,12 @@ export interface ConfiguredDevice {
   area: string;
   board_id: string;
   target_platform: string;
+  /**
+   * Chip series on the platforms that lump several chips under one key
+   * (`rp2040` / `rp2350` on `rp2`, `rtl8710b` / `rtl8720c` on `rtl87xx`).
+   * `null` where the platform needs no split or the chip is unknown.
+   */
+  mcu: string | null;
   /** mDNS hostname from StorageJSON (e.g. "my_device.local"). */
   address: string;
   /** Primary resolved IP from mDNS — empty until the device is seen online.

@@ -12,7 +12,7 @@
  */
 import type { EditorState } from "@codemirror/state";
 import type { ESPHomeAPI } from "../api/esphome-api.js";
-import type { ComponentCatalogEntry } from "../api/types/components.js";
+import type { ComponentCatalogIndexEntry } from "../api/types/components.js";
 import { type ConfigEntry, ConfigEntryType } from "../api/types/config-entries.js";
 import { fetchComponent } from "./component-name-cache.js";
 import { fetchAllComponents } from "./fetch-all-components.js";
@@ -106,11 +106,11 @@ const RE_KEY_OR_ACTION = /^[A-Za-z0-9_.]*$/;
 
 export interface CatalogIndex {
   /** Loaded list of components — used for top-level keys. */
-  components: ComponentCatalogEntry[];
+  components: ComponentCatalogIndexEntry[];
   /** id → component for direct lookups. */
-  byId: Map<string, ComponentCatalogEntry>;
+  byId: Map<string, ComponentCatalogIndexEntry>;
   /** category → components in that category (for `platform:` value lookups). */
-  byCategory: Map<string, ComponentCatalogEntry[]>;
+  byCategory: Map<string, ComponentCatalogIndexEntry[]>;
 }
 
 /**
@@ -125,6 +125,12 @@ export interface CompletionTarget {
 }
 
 let catalogPromise: Promise<CatalogIndex> | null = null;
+let catalogIndex: CatalogIndex | null = null;
+
+/** The loaded index, or null until ``loadCatalog`` resolves with components. */
+export function getCachedCatalogIndex(): CatalogIndex | null {
+  return catalogIndex;
+}
 
 /**
  * Load the component catalog once per session. The list is small enough
@@ -135,17 +141,19 @@ export function loadCatalog(api: ESPHomeAPI): Promise<CatalogIndex> {
   if (catalogPromise) return catalogPromise;
   catalogPromise = (async () => {
     const components = await fetchAllComponents(api);
-    const byId = new Map<string, ComponentCatalogEntry>();
-    const byCategory = new Map<string, ComponentCatalogEntry[]>();
+    const byId = new Map<string, ComponentCatalogIndexEntry>();
+    const byCategory = new Map<string, ComponentCatalogIndexEntry[]>();
     for (const c of components) {
       byId.set(c.id, c);
       const list = byCategory.get(c.category) ?? [];
       list.push(c);
       byCategory.set(c.category, list);
     }
-    return { components, byId, byCategory };
+    catalogIndex = { components, byId, byCategory };
+    return catalogIndex;
   })().catch((err) => {
-    console.debug("[yaml-completion] failed to load catalog:", err);
+    // Class filtering of reference pickers rides on this index: say so loudly.
+    console.warn("[yaml-completion] failed to load catalog:", err);
     catalogPromise = null;
     return { components: [], byId: new Map(), byCategory: new Map() };
   });
@@ -154,6 +162,7 @@ export function loadCatalog(api: ESPHomeAPI): Promise<CatalogIndex> {
 
 export function _clearCatalogCache(): void {
   catalogPromise = null;
+  catalogIndex = null;
 }
 
 /**

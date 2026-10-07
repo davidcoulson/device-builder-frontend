@@ -19,6 +19,32 @@ describe("readMode", () => {
     expect(readMode("?foo=bar&pico")).toBe("pico");
   });
 
+  it("returns nrf when the nrf param is present", () => {
+    expect(readMode("?nrf")).toBe("nrf");
+    expect(readMode("?foo=bar&nrf")).toBe("nrf");
+  });
+
+  it("returns bk when the bk param is present", () => {
+    expect(readMode("?bk")).toBe("bk");
+    expect(modeUrl("bk", new URL("https://web.esphome.io/"))).toBe("/?bk");
+  });
+
+  it("returns ln when the ln param is present", () => {
+    expect(readMode("?ln")).toBe("ln");
+    expect(modeUrl("ln", new URL("https://web.esphome.io/"))).toBe("/?ln");
+  });
+
+  it("opens the RTL87xx family from the RTL8710B's old ?ambz link", () => {
+    expect(readMode("?ambz")).toBe("rtl");
+    // Switching away drops the old flag rather than keeping both.
+    expect(modeUrl("ln", new URL("https://web.esphome.io/?ambz"))).toBe("/?ln");
+  });
+
+  it("returns rtl when the rtl param is present", () => {
+    expect(readMode("?rtl")).toBe("rtl");
+    expect(modeUrl("rtl", new URL("https://web.esphome.io/"))).toBe("/?rtl");
+  });
+
   it("reads window.location.search by default", () => {
     window.history.pushState(null, "", "/?pico");
     expect(readMode()).toBe("pico");
@@ -32,6 +58,14 @@ describe("modeUrl", () => {
 
   it("drops the pico param for esp mode", () => {
     expect(modeUrl("esp", new URL("https://web.esphome.io/?pico"))).toBe("/");
+  });
+
+  it("swaps one mode flag for another", () => {
+    expect(modeUrl("nrf", new URL("https://web.esphome.io/?pico"))).toBe("/?nrf");
+    expect(modeUrl("pico", new URL("https://web.esphome.io/?foo=bar&nrf"))).toBe(
+      "/?foo=bar&pico"
+    );
+    expect(modeUrl("esp", new URL("https://web.esphome.io/?nrf"))).toBe("/");
   });
 
   it("preserves other query params and normalizes the empty value", () => {

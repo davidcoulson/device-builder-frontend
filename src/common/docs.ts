@@ -72,3 +72,19 @@ export const DECODER_URL =
 // Derived so the postMessage targetOrigin / inbound-frame check can't drift
 // from DECODER_URL.
 export const DECODER_ORIGIN = new URL(DECODER_URL).origin;
+
+/** LibreTiny's Beken BK72xx page: wiring and how the chip enters its downloader. */
+export const LIBRETINY_BEKEN_GUIDE_URL =
+  "https://docs.libretiny.eu/docs/platform/beken-72xx/";
+
+/** LibreTiny's AmebaZ (RTL8710B) flashing guide: the UART2 wiring and the TX2 strap. */
+export const LIBRETINY_AMBZ_GUIDE_URL =
+  "https://docs.libretiny.eu/link/flashing-realtek-ambz";
+
+/** LibreTiny's AmebaZ2 (RTL8720C) page: wiring and the download-mode strap. */
+export const LIBRETINY_AMBZ2_GUIDE_URL =
+  "https://docs.libretiny.eu/docs/platform/realtek-ambz2/";
+
+/** LibreTiny's LN882H flashing guide: the UART0 wiring and the BOOT strap. */
+export const LIBRETINY_LN882H_FLASHING_URL =
+  "https://docs.libretiny.eu/link/flashing-ln882h";

@@ -39,6 +39,7 @@ import {
 } from "../util/yaml-cursor-paths.js";
 import {
   emptyBlockFixKind,
+  gluedColonKey,
   lineKeyToken,
   type YamlAutoFix,
 } from "../util/yaml-error-analysis.js";
@@ -204,10 +205,6 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
 
   protected render() {
     return html`<div class="cm-wrap"></div>`;
-  }
-
-  protected firstUpdated() {
-    this._mountEditor();
   }
 
   private _buildExtensions() {
@@ -606,7 +603,7 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
     return extensions;
   }
 
-  private _mountEditor() {
+  private _buildView() {
     this._mountView(this.value, this._buildExtensions());
 
     // Remount paths in updated() return before the highlightRange
@@ -651,7 +648,9 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
       const doc = view.state.doc;
       if (fix.line < 1 || fix.line > doc.lines) return null;
       const t = doc.line(fix.line);
-      if (lineKeyToken(t.text) !== fix.key || indentOf(t.text) !== fix.fromIndent) {
+      const key =
+        fix.kind === "colon-space" ? gluedColonKey(t.text) : lineKeyToken(t.text);
+      if (key !== fix.key || indentOf(t.text) !== fix.fromIndent) {
         return null;
       }
       // A dedent must have the spaces it wants to remove.
@@ -671,12 +670,12 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
     if (line === null) return "stale";
 
     const doc = view.state.doc;
-    // The dash-space repair inserts after the stuck dash; comment-out
-    // inserts `# ` at the line's indent; remove-line deletes the whole
-    // line; indent repairs insert or remove leading spaces at the line
-    // start. Pure arithmetic on the resolved line + its doc, so both
-    // invocations (pre-await proposal, post-await dispatch) stay
-    // consistent with the doc they resolved against.
+    // The dash-space repair inserts after the stuck dash, colon-space after
+    // the glued colon; comment-out inserts `# ` at the line's indent;
+    // remove-line deletes the whole line; indent repairs insert or remove
+    // leading spaces at the line start. Pure arithmetic on the resolved
+    // line + its doc, so both invocations (pre-await proposal, post-await
+    // dispatch) stay consistent with the doc they resolved against.
     const changeAt = (
       target: Line,
       docLength: number
@@ -684,6 +683,8 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
       const at = target.from;
       if (fix.kind === "dash-space")
         return { from: at + fix.fromIndent + 1, insert: " " };
+      if (fix.kind === "colon-space")
+        return { from: at + fix.fromIndent + fix.key.length + 1, insert: " " };
       if (fix.kind === "comment-out") return { from: at + fix.fromIndent, insert: "# " };
       if (fix.kind === "remove-line")
         return { from: at, to: Math.min(target.to + 1, docLength) };
@@ -734,7 +735,8 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
 
   /**
    * Tear down the current view and mount a fresh one against
-   * `this.value`. Both rebuild branches in `updated()` (theme/API
+   * `this.value`; also the first mount and the one after a reconnect.
+   * Both rebuild branches in `updated()` (theme/API
    * change, configuration change) end with the same destroy +
    * clear + reset-throttle + remount sequence; without this
    * helper the throttle reset in particular tends to drift
@@ -743,7 +745,7 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
    * what regressed cross-device cursor dispatch — a host-side
    * field outliving the destroyed view).
    */
-  private _remountEditor() {
+  protected _mountEditor() {
     this._destroyView();
     this._container.innerHTML = "";
     this._lastReportedCursorLine = 0;
@@ -755,7 +757,7 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
       this._lastCompletionOpen = false;
       fireEvent(this, "yaml-completion-open", { open: false });
     }
-    this._mountEditor();
+    this._buildView();
   }
 
   updated(changed: Map<string, unknown>) {
@@ -786,7 +788,7 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
       this._view
     ) {
       this.value = this._view.state.doc.toString();
-      this._remountEditor();
+      this._mountEditor();
       return;
     }
 
@@ -801,7 +803,7 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
     // owned by `_mountEditor` (offset 0, scroll top via
     // `EditorState.create`'s default selection), not this branch.
     if (changed.has("configuration") && this._view) {
-      this._remountEditor();
+      this._mountEditor();
       return;
     }
 
@@ -812,7 +814,7 @@ export class ESPHomeYamlEditor extends CodeMirrorEditorElement {
       // The undoDepth gate keeps later external repopulates (after the
       // user edits/clears) undoable.
       if (current === "" && this.value !== "" && undoDepth(this._view.state) === 0) {
-        this._remountEditor();
+        this._mountEditor();
         return;
       }
       if (current !== this.value) {

@@ -21,6 +21,7 @@ import {
 } from "@mdi/js";
 import { html, LitElement, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { repeat } from "lit/directives/repeat.js";
 
 import type {
   AutomationCondition,
@@ -38,6 +39,7 @@ import { renderMarkdown } from "../../../util/markdown.js";
 import { registerMdiIcons } from "../../../util/register-icons.js";
 import "../config-entry-form.js";
 import type { ConfigEntryValueChange } from "../config-entry-form.js";
+import { paramEntriesOf } from "../config-entry-renderers/scalar-value-entry.js";
 import { scrollFlashRow } from "../field-highlight.js";
 import { fieldHighlightStyles } from "../field-highlight.styles.js";
 import { automationEditorStyles } from "./automation-editor.styles.js";
@@ -48,6 +50,7 @@ import {
 } from "./automation-focus.js";
 import type { CatalogPickedDetail } from "./catalog-picker-dialog.js";
 import { requestCatalogPick } from "./catalog-picker-host.js";
+import { RowKeys } from "./row-keys.js";
 import {
   applyParamChange,
   emptyConditionNode,
@@ -119,10 +122,11 @@ export class ESPHomeAutomationConditionTree extends LitElement {
    */
   @state() private _changingIdx = -1;
 
-  /** Rows with "Show advanced settings" open. Keyed by index because the
-   *  list renders by position (no keyed repeat); move / remove / kind
-   *  changes remap or drop entries so the flag follows its row. */
-  @state() private _advancedIdxs: ReadonlySet<number> = new Set();
+  /** Rows with "Show advanced settings" open, by row key, so the flag
+   *  follows its row through a move or a delete. */
+  @state() private _advancedRows: ReadonlySet<number> = new Set();
+
+  private readonly _rows = new RowKeys<ConditionNode>();
 
   static styles = [
     espHomeStyles,
@@ -135,15 +139,28 @@ export class ESPHomeAutomationConditionTree extends LitElement {
    *  the property by value, so a reset means a genuinely new target). */
   private _focusScrolled = false;
 
+  /** The control that asked for a reorder; see the action list. */
+  private _refocus: HTMLElement | null = null;
+
+  /** Key of the row the caret's target was handed to; see the action list. */
+  private _focusRow: number | undefined;
+
   protected willUpdate(changed: PropertyValues<this>): void {
-    if (changed.has("focusTarget")) this._focusScrolled = false;
+    if (!changed.has("focusTarget")) return;
+    this._focusScrolled = false;
+    const at = this.focusTarget?.node[0];
+    this._focusRow =
+      typeof at === "number" ? this._rows.keysFor(this.conditions)[at] : undefined;
   }
 
-  protected updated(): void {
+  protected updated(changed: PropertyValues<this>): void {
+    if (changed.has("conditions")) this._refocus?.focus();
+    this._refocus = null;
     this._maybeScrollRow();
   }
 
   protected render() {
+    const keys = this._rows.keysFor(this.conditions);
     return html`
       <div class=${this.noHeader ? "" : "ae-section"}>
         ${
@@ -156,7 +173,11 @@ export class ESPHomeAutomationConditionTree extends LitElement {
         ${
           this.conditions.length === 0
             ? html`<p class="ae-empty">${this._localize("device.add_condition")}</p>`
-            : this.conditions.map((node, idx) => this._renderNode(node, idx))
+            : repeat(
+                this.conditions,
+                (_node, idx) => keys[idx],
+                (node, idx) => this._renderNode(node, idx, keys[idx])
+              )
         }
         <button
           type="button"
@@ -171,10 +192,13 @@ export class ESPHomeAutomationConditionTree extends LitElement {
     `;
   }
 
-  private _renderNode(node: ConditionNode, idx: number) {
+  private _renderNode(node: ConditionNode, idx: number, key: number) {
     const def = this.catalog.find((c) => c.id === node.condition_id);
     const lastIdx = this.conditions.length - 1;
-    const rowFocus = this.focusTarget?.node[0] === idx ? this.focusTarget : null;
+    const rowFocus =
+      this.focusTarget?.node[0] === idx && key === this._focusRow
+        ? this.focusTarget
+        : null;
     const nestedFocus =
       rowFocus && rowFocus.node.length > 1 ? childFocus(rowFocus) : null;
     const fieldFocus =
@@ -230,9 +254,9 @@ export class ESPHomeAutomationConditionTree extends LitElement {
               : nothing
           }
           ${
-            def && def.config_entries.length > 0
+            def && paramEntriesOf(def).length > 0
               ? html`<esphome-config-entry-form
-                  .entries=${def.config_entries}
+                  .entries=${paramEntriesOf(def)}
                   .values=${node.params}
                   .requiredGroups=${def.required_groups ?? NO_REQUIRED_GROUPS}
                   .board=${this.board}
@@ -240,7 +264,7 @@ export class ESPHomeAutomationConditionTree extends LitElement {
                   .focusFieldPath=${fieldFocus}
                   ?disabled=${this.disabled}
                   advanced-section
-                  ?show-advanced=${this._advancedIdxs.has(idx)}
+                  ?show-advanced=${this._advancedRows.has(key)}
                   @value-change=${(e: CustomEvent<ConfigEntryValueChange>) =>
                     this._onParamChange(idx, e)}
                   @advanced-toggle=${(e: CustomEvent<{ show: boolean }>) =>
@@ -319,13 +343,14 @@ export class ESPHomeAutomationConditionTree extends LitElement {
   }
 
   private _setRowAdvanced(idx: number, show: boolean) {
-    const next = new Set(this._advancedIdxs);
+    const key = this._rows.keysFor(this.conditions)[idx];
+    const next = new Set(this._advancedRows);
     if (show) {
-      next.add(idx);
+      next.add(key);
     } else {
-      next.delete(idx);
+      next.delete(key);
     }
-    this._advancedIdxs = next;
+    this._advancedRows = next;
   }
 
   private _onChildrenChange(
@@ -340,19 +365,11 @@ export class ESPHomeAutomationConditionTree extends LitElement {
   }
 
   private _move(from: number, to: number) {
-    const next = new Set(this._advancedIdxs);
-    if (this._advancedIdxs.has(from)) next.add(to);
-    else next.delete(to);
-    if (this._advancedIdxs.has(to)) next.add(from);
-    else next.delete(from);
-    this._advancedIdxs = next;
+    this._refocus = this.shadowRoot?.activeElement as HTMLElement | null;
     this._emit(swap(this.conditions, from, to));
   }
 
   private _remove(idx: number) {
-    this._advancedIdxs = new Set(
-      [...this._advancedIdxs].filter((i) => i !== idx).map((i) => (i > idx ? i - 1 : i))
-    );
     this._emit(removeAt(this.conditions, idx));
   }
 
@@ -369,7 +386,7 @@ export class ESPHomeAutomationConditionTree extends LitElement {
     const terminal =
       t.node.length > 1
         ? !def?.accepts_condition_list
-        : t.field.length === 0 || !def || def.config_entries.length === 0;
+        : t.field.length === 0 || !def || paramEntriesOf(def).length === 0;
     if (!terminal) return;
     const row = this.shadowRoot?.querySelectorAll<HTMLElement>(".ae-row")[idx];
     if (row) scrollFlashRow(row);

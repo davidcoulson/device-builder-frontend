@@ -16,6 +16,7 @@ import { ConfigEntryType } from "../api/types/config-entries.js";
 import { parseFloatWithUnit } from "./float-with-unit.js";
 import { parseHexInt } from "./hex-int.js";
 import { parseIntInput } from "./int-input.js";
+import { findOptionValue } from "./option-match.js";
 import { isSubstitutionString } from "./substitutions.js";
 import { parseYamlBoolean } from "./yaml-serialize.js";
 
@@ -48,7 +49,8 @@ export function nearCanonicalOption(
  * A value counts as "present" for required / constraint-group purposes
  * unless it's nullish, a blank/whitespace string, or an empty array.
  * Shared so `validateEntry` and the constraint-group evaluator agree on
- * what "set" means.
+ * what "set" means; the evaluator also discounts a block the serializer
+ * would prune.
  */
 export function isValuePresent(raw: unknown): boolean {
   return !(
@@ -183,14 +185,16 @@ export function validateEntry(entry: ConfigEntry, raw: unknown): ValidationError
   // for fields that opt into custom values (combobox-style entries treat
   // `options` as suggestions, not a fixed set).
   if (entry.options && entry.options.length > 0 && !entry.allow_custom_value) {
-    const rawStr = String(raw);
-    const allowed = entry.options.map((o) => o.value);
     // A case-only difference is accepted: esphome's `cv.one_of(..., upper=True)`
     // normalizes case, so a board-written `esp32` against a catalog `ESP32`
     // option compiles fine and the form already resolves it case-insensitively.
+    // The same matcher decides what the select shows, so a value the form
+    // presents as an option is never flagged as one it does not list.
     if (
-      !allowed.includes(rawStr) &&
-      nearCanonicalOption(rawStr, entry.options) === null
+      findOptionValue(
+        raw,
+        entry.options.map((o) => o.value)
+      ) === null
     ) {
       return { key: entry.key, code: "validation.invalid_option" };
     }

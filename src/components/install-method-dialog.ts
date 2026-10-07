@@ -1,6 +1,7 @@
 import { consume } from "@lit/context";
 import {
   mdiArrowLeft,
+  mdiBluetooth,
   mdiChevronDown,
   mdiChevronRight,
   mdiChevronUp,
@@ -16,20 +17,23 @@ import { customElement, property, state } from "lit/decorators.js";
 import { classMap } from "lit/directives/class-map.js";
 import type { ESPHomeAPI } from "../api/index.js";
 import { DeviceState } from "../api/types/devices.js";
-import { OTA_PORT } from "../api/types/streaming.js";
 import { esphomeWebUrl } from "../common/docs.js";
 import type { LocalizeFunc } from "../common/localize.js";
 import { apiContext, localizeContext } from "../context/index.js";
+import { isEsptoolPlatform } from "../platforms/esp/index.js";
+import { BleProbeController } from "../platforms/nrf52/index.js";
+import type { AnyBrowserInstall } from "../platforms/platform-support.js";
+import { platformFor } from "../platforms/registry.js";
 import { backButtonStyles } from "../styles/back-button.js";
 import { primaryDialogHeaderStyles } from "../styles/dialog-header.js";
 import { disclosureStyles } from "../styles/disclosure.js";
 import { emptyStateStyles } from "../styles/empty-state.js";
 import { inputStyles } from "../styles/inputs.js";
 import { newItemHighlightStyles } from "../styles/new-item-highlight.js";
+import { pairingAddressStyles } from "../styles/pairing-address.js";
 import { serialPortHintStyles } from "../styles/serial-port-hints.js";
 import { espHomeStyles } from "../styles/shared.js";
 import { type DeploymentEnvironment, detectEnvironment } from "../util/environment.js";
-import { isEsptoolPlatform } from "../util/esptool-platform.js";
 import { fireEvent } from "../util/fire-event.js";
 import { registerMdiIcons } from "../util/register-icons.js";
 import { SerialPortsPollController } from "../util/serial-ports-poll-controller.js";
@@ -40,11 +44,15 @@ import {
 } from "../util/web-serial.js";
 import {
   type MethodRowContext,
+  otaAddressOf,
+  renderBleNusOption,
   renderBootloaderOption,
   renderInstallNotice,
   renderManualDownloadOption,
   renderMethodRow,
+  renderOtaAddressCard,
   renderOtaOption,
+  renderPlatformFlashOption,
   renderServerSerialOption,
 } from "./install-method-dialog-rows.js";
 import { installMethodDialogStyles } from "./install-method-dialog.styles.js";
@@ -61,6 +69,7 @@ import "./base-dialog.js";
 
 registerMdiIcons({
   "arrow-left": mdiArrowLeft,
+  bluetooth: mdiBluetooth,
   "chevron-down": mdiChevronDown,
   "chevron-right": mdiChevronRight,
   "chevron-up": mdiChevronUp,
@@ -91,6 +100,10 @@ export class ESPHomeInstallMethodDialog extends LitElement {
 
   @property()
   deviceTargetPlatform = "";
+
+  /** The platform flashers the device can take (``installsFor``). */
+  @property({ attribute: false })
+  platformInstalls: readonly AnyBrowserInstall[] = [];
 
   @property()
   mode: "install" | "logs" = "install";
@@ -124,6 +137,7 @@ export class ESPHomeInstallMethodDialog extends LitElement {
   @state() private _view: DialogView = "method";
 
   private _portsPoll = new SerialPortsPollController(this, () => this._api);
+  private _bleProbe = new BleProbeController(this);
   /**
    * `true` when the user has opened the "Advanced options"
    * disclosure at the bottom of the method list. Holds the
@@ -156,6 +170,11 @@ export class ESPHomeInstallMethodDialog extends LitElement {
     return isEsptoolPlatform(this.deviceTargetPlatform);
   }
 
+  // Whether the target's platform offers Bluetooth logs in this browser.
+  private get _bleLogs(): boolean {
+    return platformFor(this.deviceTargetPlatform)?.logs?.ble?.available() ?? false;
+  }
+
   protected willUpdate(changed: Map<string, unknown>) {
     // Reset to method view when dialog opens. Also collapse the
     // OTA address override and re-seed its input from the
@@ -169,6 +188,7 @@ export class ESPHomeInstallMethodDialog extends LitElement {
       this._otaAddressValue = this.deviceCurrentAddress;
     }
     this._portsPoll.set(this.open && this._view === "port-select");
+    this._bleProbe.set(this.open && this.mode === "logs" && this._bleLogs);
   }
 
   static styles = [
@@ -181,6 +201,7 @@ export class ESPHomeInstallMethodDialog extends LitElement {
     emptyStateStyles,
     backButtonStyles,
     installMethodDialogStyles,
+    pairingAddressStyles,
   ];
 
   protected render() {
@@ -208,16 +229,24 @@ export class ESPHomeInstallMethodDialog extends LitElement {
     const availability = this._webSerialAvailability;
     const hasWebSerial = availability === "available";
     const env = this._environment;
-    // Browser flashers (in-app Web Serial esptool-js, the external flasher) are
-    // ESP-only. Non-ESP targets (RP2040 / RP2350, nrf52, libretiny) flash over
-    // serial only via the backend (`esphome run` / server-serial).
+    // The esptool-js and external flashers are ESP-only; nRF52, RP2, the
+    // RTL8720C, BK72xx and LN882H get their own in-app rows (renderPlatformFlashOption).
     const isEsptool = this._isEsptoolPlatform;
     const isLogs = this.mode === "logs";
+    // Web Serial logs also cover every platform whose logs policy offers them
+    // (Pico, nRF52, RTL8720C, BK72xx); flashing stays esptool-only.
+    const webSerialPlatform =
+      isEsptool ||
+      (isLogs && platformFor(this.deviceTargetPlatform)?.logs?.serial !== undefined);
     // Drop the redundant server-serial row only when in-app Web Serial is
     // actually available on localhost (same USB stack). Keep it on insecure
     // origins as a fallback: there a Web-Serial-incapable browser (Safari) still
     // needs a working serial path, and we can't detect that case client-side.
-    const showServerSerialRow = !(env === "localhost" && hasWebSerial && isEsptool);
+    const showServerSerialRow = !(
+      env === "localhost" &&
+      hasWebSerial &&
+      webSerialPlatform
+    );
     // On localhost a Web-Serial-incapable browser gets the same "Plug into this
     // computer" path from the server-serial row, so drop the disabled USB hint
     // there to avoid a duplicate, non-actionable title.
@@ -225,29 +254,39 @@ export class ESPHomeInstallMethodDialog extends LitElement {
     // The external flasher only flashes (install). In logs mode the USB row is
     // actionable solely via in-app Web Serial, so show it only when that's
     // available; otherwise logs go through server-serial / OTA.
-    const showUsbRow = isEsptool && (isLogs ? hasWebSerial : !dropDisabledUsb);
+    const showUsbRow = webSerialPlatform && (isLogs ? hasWebSerial : !dropDisabledUsb);
     // Logs on an insecure origin: the in-app USB row is hidden (Web Serial is
     // blocked here and the external flasher only flashes), so offer a link to
     // ESPHome Web — a secure-context origin where the user can connect over USB
-    // and read serial logs. ESP-only, like the USB row.
+    // and read serial logs. ESP-only: that landing is ESPHome Web's ESP
+    // connect flow, which runs esptool chip detection.
     const showLogsWebRow = isLogs && isEsptool && availability === "insecure-context";
+    const showBleNusRow = isLogs && this._bleLogs;
 
     const ctx = this._rowContext();
     const otaRow = renderOtaOption(ctx);
     const usbRow = showUsbRow ? this._renderUsbOption(availability) : nothing;
     const logsWebRow = showLogsWebRow ? this._renderLogsWebOption() : nothing;
+    const flasherRows = this._renderPlatformFlashRows(ctx, (i) => !i.component);
+    const updaterRows = this._renderPlatformFlashRows(ctx, (i) => !!i.component);
+    const bleNusRow = showBleNusRow
+      ? renderBleNusOption(ctx, this._bleProbe.state)
+      : nothing;
     const serverRow = showServerSerialRow
       ? renderServerSerialOption(this._localize, env, () => this._onServerSerial())
       : nothing;
     // A never-flashed device can't receive an OTA by itself — lead with
-    // the USB rows so the first install goes over a cable. At least one
-    // of the two renders in install mode (their hide conditions are
-    // mutually exclusive). The logs → ESPHome Web row only appears in logs
-    // mode, so it's inert (``nothing``) in the usbFirst (install) ordering.
+    // the USB rows, where there are any, so the first install goes over a
+    // cable; the server-serial row is the cable path when neither renders (a
+    // chip no browser flasher writes). The logs → ESPHome Web row only
+    // appears in logs mode, so it's inert (``nothing``) in the usbFirst
+    // (install) ordering. An updater needs firmware that already runs, as an
+    // OTA does, so it goes last with it; it stays offered, since a board
+    // flashed outside the dashboard reads as never flashed too.
     const usbFirst = !isLogs && this.neverFlashed;
     const rows = usbFirst
-      ? [usbRow, logsWebRow, serverRow, otaRow]
-      : [otaRow, usbRow, logsWebRow, serverRow];
+      ? [usbRow, flasherRows, logsWebRow, serverRow, updaterRows, otaRow]
+      : [otaRow, usbRow, flasherRows, updaterRows, logsWebRow, bleNusRow, serverRow];
 
     return html`
       ${renderInstallNotice(ctx)}
@@ -285,7 +324,7 @@ export class ESPHomeInstallMethodDialog extends LitElement {
    * Web-Serial-incapable browser there still gets the enabled external-flasher
    * row. The flasher tab (a secure origin) then feature-detects for real and
    * advertises the result on its ready frame, and the dashboard declines the
-   * hand-off with an unsupported-browser error (see ``util/usb-flasher.ts``).
+   * hand-off with an unsupported-browser error (see ``platforms/esp/usb-flasher.ts``).
    */
   private _renderUsbOption(availability: WebSerialAvailability) {
     const title = this._localize("dashboard.install_method_usb_local");
@@ -411,13 +450,30 @@ export class ESPHomeInstallMethodDialog extends LitElement {
     `;
   }
 
+  /** The rows of the device's platform flashers that ``wanted`` picks. */
+  private _renderPlatformFlashRows(
+    ctx: MethodRowContext,
+    wanted: (install: AnyBrowserInstall) => boolean,
+    advanced = false
+  ) {
+    const availability = this._webSerialAvailability;
+    const handoffDesc =
+      availability === "insecure-context" ? this._renderUsbRemoteDesc() : undefined;
+    return this.platformInstalls
+      .filter((install) => (install.advanced ?? false) === advanced && wanted(install))
+      .map((install) =>
+        renderPlatformFlashOption(ctx, install, availability === "available", handoffDesc)
+      );
+  }
+
   /**
    * "Advanced options" disclosure at the bottom of the method
    * list. Holds the OTA address-override card (target a specific
    * IP / hostname — useful when the device hasn't been resolved
    * yet, or when overriding the dashboard's auto-detected
-   * address) and, in install mode, the manual binary-download
-   * option (compile here, flash with an external tool).
+   * address), the platform flashers marked advanced and, in install
+   * mode, the manual binary-download option (compile here, flash with
+   * an external tool).
    */
   private _renderAdvancedSection(ctx: MethodRowContext) {
     return renderDisclosure({
@@ -429,7 +485,18 @@ export class ESPHomeInstallMethodDialog extends LitElement {
       panelId: "advanced-panel",
       body: () => html`
         <div class="advanced-panel-content">
-          ${this._renderOtaAddressCard()}
+          ${renderOtaAddressCard({
+            localize: this._localize,
+            mode: this.mode,
+            expanded: this._otaAddressCardExpanded,
+            value: this._otaAddressValue,
+            onToggle: this._onToggleOtaAddressCard,
+            onInput: (value) => {
+              this._otaAddressValue = value;
+            },
+            onSubmit: this._submitOtaAddress,
+          })}
+          ${this._renderPlatformFlashRows(ctx, () => true, true)}
           ${
             this.mode === "install" &&
             this.canFlashBootloader &&
@@ -443,83 +510,6 @@ export class ESPHomeInstallMethodDialog extends LitElement {
     });
   }
 
-  /**
-   * OTA address-override card. Header row mirrors the other
-   * .option cards (icon + title + description) and the chevron
-   * toggles an inline form INSIDE the same card so the address
-   * input lives within the card's outline rather than dangling
-   * below as a separate panel.
-   */
-  private _renderOtaAddressCard() {
-    const expanded = this._otaAddressCardExpanded;
-    const trimmed = this._otaAddressValue.trim();
-    const canSubmit = trimmed.length > 0 && trimmed !== OTA_PORT;
-    return html`
-      <div class="option-collapsible">
-        <button
-          type="button"
-          class="option-collapsible__header"
-          aria-expanded=${expanded ? "true" : "false"}
-          aria-controls=${expanded ? "ota-address-form" : nothing}
-          @click=${this._onToggleOtaAddressCard}
-        >
-          <wa-icon library="mdi" name="ip-network-outline"></wa-icon>
-          <div class="info">
-            <span class="title" id="ota-address-title"
-              >${this._localize("dashboard.install_method_network_address_label")}</span
-            >
-            <span class="desc"
-              >${this._localize("dashboard.install_method_network_address_desc")}</span
-            >
-          </div>
-          <wa-icon
-            class="option-chevron"
-            library="mdi"
-            name=${expanded ? "chevron-up" : "chevron-down"}
-          ></wa-icon>
-        </button>
-        ${
-          expanded
-            ? html`
-                <div id="ota-address-form" class="option-collapsible__body">
-                  <input
-                    class="ota-form-input"
-                    type="text"
-                    autocomplete="off"
-                    spellcheck="false"
-                    placeholder="192.168.1.42"
-                    aria-labelledby="ota-address-title"
-                    .value=${this._otaAddressValue}
-                    @input=${(e: Event) => {
-                      this._otaAddressValue = (e.target as HTMLInputElement).value;
-                    }}
-                    @keydown=${(e: KeyboardEvent) => {
-                      if (e.key === "Enter" && canSubmit) {
-                        this._submitOtaAddress();
-                      }
-                    }}
-                  />
-                  <div class="ota-form-actions">
-                    <button
-                      class="btn btn--primary"
-                      ?disabled=${!canSubmit}
-                      @click=${this._submitOtaAddress}
-                    >
-                      ${this._localize(
-                        this.mode === "logs"
-                          ? "dashboard.logs_method_network_address_submit"
-                          : "dashboard.install_method_network_address_submit"
-                      )}
-                    </button>
-                  </div>
-                </div>
-              `
-            : nothing
-        }
-      </div>
-    `;
-  }
-
   private _onToggleAdvanced = () => {
     this._advancedExpanded = !this._advancedExpanded;
   };
@@ -529,9 +519,8 @@ export class ESPHomeInstallMethodDialog extends LitElement {
   };
 
   private _submitOtaAddress = () => {
-    const port = this._otaAddressValue.trim();
-    if (!port || port === OTA_PORT) return;
-    this._selectMethod("ota", port);
+    const address = otaAddressOf(this._otaAddressValue);
+    if (address !== null) this._selectMethod("ota", address);
   };
 
   private _onServerSerial() {

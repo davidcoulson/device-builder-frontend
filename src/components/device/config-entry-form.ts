@@ -30,18 +30,25 @@ import type { ConfigEntry, RequiredGroup } from "../../api/types/config-entries.
 import { ConfigEntryType } from "../../api/types/config-entries.js";
 import type { ConfiguredDevice } from "../../api/types/devices.js";
 import type { LocalizeFunc } from "../../common/localize.js";
-import { apiContext, devicesContext, localizeContext } from "../../context/index.js";
+import {
+  apiContext,
+  devicesContext,
+  localizeContext,
+  valuesReadContext,
+} from "../../context/index.js";
 import { floatRequiredFirst } from "../../util/config-entry-ordering.js";
+import { sameEntryTarget } from "../../util/config-entry-target.js";
 import { anyAdvancedEntry, pathIsAdvanced } from "../../util/config-entry-tree.js";
 import type { ComponentProvider } from "../../util/config-entry-yaml-scan.js";
-import { isEntryVisible, type ValidationError } from "../../util/config-validation.js";
+import type { ValidationError } from "../../util/config-validation.js";
+import { constraintMemberPaths } from "../../util/constraint-groups.js";
 import { resolveDeviceName } from "../../util/device-name.js";
 import { getErrorMessage } from "../../util/error-message.js";
 import { overlayBoardLockedPresets } from "../../util/featured-locks.js";
 import { fireEvent } from "../../util/fire-event.js";
 import { hasMaterialValue } from "../../util/material-value.js";
 import { getIn, isPrimitiveOrNullish } from "../../util/nested-values.js";
-import { parseBoardGpio } from "../../util/pin/gpio.js";
+import { findOptionValue } from "../../util/option-match.js";
 import {
   fetchPinRegistryModes,
   getCachedPinRegistryModes,
@@ -56,6 +63,7 @@ import { registerMdiIcons } from "../../util/register-icons.js";
 import { nearestScrollContainer } from "../../util/scroll-container.js";
 import { SessionBlobCacheController } from "../../util/session-blob-cache-controller.js";
 import { isSubstitutionString, parseSubstitutions } from "../../util/substitutions.js";
+import { CatalogIndexController } from "./catalog-index-controller.js";
 import {
   _isStructuralType,
   filterRenderable,
@@ -66,9 +74,12 @@ import {
   parseFieldKey,
   renderYamlOnlyField,
 } from "./config-entry-renderers-shared.js";
+import { rowMemoryCtx } from "./config-entry-renderers/row-memory-ctx.js";
+import { ValueMemory } from "./config-entry-renderers/value-memory.js";
 import { ConstraintClusterController } from "./constraint-cluster-controller.js";
 import { FieldFocusController } from "./field-focus-controller.js";
 import { FieldScrollController } from "./field-scroll-controller.js";
+import { closePinAdvanced } from "./pin/advanced-key.js";
 
 import "@home-assistant/webawesome/dist/components/divider/divider.js";
 import "@home-assistant/webawesome/dist/components/icon/icon.js";
@@ -82,19 +93,18 @@ import "../mdi-icon-picker.js";
 import "../options-combobox.js";
 import {
   buildFormRenderPlan,
+  type FormRenderPlan,
   unitAdvancedGate,
   unitAllAdvanced,
   unitHasMaterialValue,
 } from "./config-entry-form-plan.js";
 import {
+  clearEnableStash,
   fieldRendererStyles,
-  formatConstraintKeys,
-  isRadioCluster,
   labelFor,
   renderBooleanField,
   renderColorField,
-  renderConstraintClusterField,
-  renderConstraintRadioField,
+  renderConstraintCluster,
   type RenderCtx,
   renderExclusiveGroupField,
   renderFloatWithUnitField,
@@ -112,9 +122,12 @@ import {
   renderTextareaField,
   renderTimePeriodField,
 } from "./config-entry-renderers.js";
-import { collectUnsatisfiedConstraints } from "./config-entry-renderers/constraint-banners.js";
+import { renderConstraintBanners } from "./config-entry-renderers/constraint-banner-view.js";
 import { renderLambdaField } from "./config-entry-renderers/lambda.js";
-import { renderTemplatableField } from "./config-entry-renderers/templatable.js";
+import {
+  clearTemplatableStash,
+  renderTemplatableField,
+} from "./config-entry-renderers/templatable.js";
 import "./password-input.js";
 import "./secret-picker.js";
 
@@ -167,7 +180,10 @@ export class ESPHomeConfigEntryForm extends LitElement {
   );
 
   /** Schema entries to render (recursive — NESTED entries contain
-   *  their own `config_entries`). */
+   *  their own `config_entries`). The form tells its target by these
+   *  objects (``sameEntryTarget``): pass the catalog's own entries, or
+   *  cache any built ones per target, since a copy made on each render
+   *  reads as a new target and drops what the user stashed. */
   @property({ attribute: false })
   entries: ConfigEntry[] = [];
 
@@ -268,6 +284,12 @@ export class ESPHomeConfigEntryForm extends LitElement {
   @property({ attribute: false })
   presentComponents: ReadonlySet<string> = new Set();
 
+  /** See ``valuesReadContext``: on a new count the form forgets what could
+   *  write a value. What is only shown, such as open groups, is kept. */
+  @consume({ context: valuesReadContext, subscribe: true })
+  @state()
+  valuesRead = 0;
+
   /** Instance-relative field path to scroll into view, from the YAML cursor. */
   @property({ attribute: false })
   focusFieldPath?: string[];
@@ -296,38 +318,13 @@ export class ESPHomeConfigEntryForm extends LitElement {
    *  of the sync); owns its own listener lifecycle. */
   protected readonly _fieldFocus = new FieldFocusController(this);
 
-  /**
-   * Transient unit choice for FLOAT_WITH_UNIT entries the user
-   * picked before typing a numeric value. Keyed by dotted path.
-   * `chooseDisplayUnit` reads this layer before falling back to
-   * the catalog default, so the picker survives a rerender even
-   * when the form value is still `""`.
-   *
-   * The setter (in `_buildCtx`) calls `requestUpdate()` because
-   * a unit-only pick doesn't reach the form's value-change cycle
-   * — no `emit()` happens — so Lit needs the explicit nudge.
-   *
-   * Cleared on `entries` change so a different component's picks
-   * don't bleed across; otherwise superseded once a non-empty
-   * `parsed.unit` from the form value beats the pending layer.
-   */
-  private _pendingUnits: Map<string, string> = new Map();
-
-  /**
-   * Transient raw-text buffer for FLOAT_WITH_UNIT magnitude inputs.
-   * `<input type="number">` reads `""` from `.value` for
-   * mid-typing intermediates (`"-"`, `"1e"`, `"1."`); Lit's
-   * `.value=` property binding then re-writes `""` over the
-   * partial text. The renderer reads from this buffer first so
-   * partial input survives until the user produces a parseable
-   * value (which lands in `this.values` normally) or blurs.
-   */
-  private _editingMagnitudes: Map<string, string> = new Map();
+  private readonly _valueMemory = new ValueMemory(this);
 
   /** Either/or constraint-cluster (radio chooser) choice + stash state and the
    *  post-render radio-group sync; kept in a controller so this file doesn't
    *  grow. */
   private _constraintClusters = new ConstraintClusterController(this);
+  private _catalogIndex = new CatalogIndexController(this, () => this._api);
 
   /** gateAdvanced unit placement (key → paints inline, else gated) frozen
    *  while the section is open, so a value landing mid-edit doesn't re-home
@@ -368,8 +365,10 @@ export class ESPHomeConfigEntryForm extends LitElement {
    */
   private _filterRenderable = (
     entries: ConfigEntry[],
-    values: Record<string, unknown>
-  ): ConfigEntry[] => filterRenderable(entries, values, renderFilterOptions(this));
+    values: Record<string, unknown>,
+    requiredGroups?: RequiredGroup[]
+  ): ConfigEntry[] =>
+    filterRenderable(entries, values, renderFilterOptions(this, { requiredGroups }));
 
   protected render() {
     const ctx = this._buildCtx();
@@ -408,7 +407,7 @@ export class ESPHomeConfigEntryForm extends LitElement {
       renderFilterOptions(this)
     );
     const renderItem = this._makeItemRenderer(plan, ctx);
-    return html`${this._renderConstraintBanners(ctx, plan.memberKeys)}${plan.ordered.map(
+    return html`${this._renderConstraintBanners(ctx, plan)}${plan.ordered.map(
       renderItem
     )}`;
   }
@@ -433,25 +432,9 @@ export class ESPHomeConfigEntryForm extends LitElement {
     // a depends_on that isn't met) renders nothing, so it must not inflate the
     // "(N)" count or tip the all-advanced check. An exclusive group is one
     // dropdown. A constraint cluster is one box painted at its *first* member's
-    // slot, and only when a member is renderable — ``renderConstraintClusterField``
-    // returns nothing when every member is gated off, so mirror that predicate
-    // here or a fully-gated cluster still counts.
-    const targetPlatform = ctx.board?.esphome.platform ?? null;
-    const clusterRenders = (cluster: (typeof plan.clusters)[number]): boolean =>
-      cluster.members.some(
-        (m) =>
-          getIn(this.values, [m.key]) !== undefined ||
-          isEntryVisible(
-            m,
-            this.values,
-            this.presentComponents,
-            targetPlatform,
-            undefined,
-            this.entries
-          )
-      );
+    // slot, and only when the plan paints it.
     const renderedClusterKeys = new Set(
-      plan.clusters.filter(clusterRenders).map((c) => c.members[0].key)
+      plan.clusters.filter((c) => c.mode !== "none").map((c) => c.cluster.members[0].key)
     );
     const willRender = (item: ConfigEntry | ConfigEntry[]): boolean => {
       if (Array.isArray(item)) return true;
@@ -489,8 +472,8 @@ export class ESPHomeConfigEntryForm extends LitElement {
       const unitPrefilled = (item: ConfigEntry | ConfigEntry[]): boolean => {
         if (Array.isArray(item)) return unitHasMaterialValue(item, this.values);
         if (plan.memberKeys.has(item.key)) {
-          const cluster = plan.clusterByFirstKey.get(item.key);
-          return !!cluster && unitHasMaterialValue(cluster.members, this.values);
+          const paint = plan.clusterByFirstKey.get(item.key);
+          return !!paint && unitHasMaterialValue(paint.cluster.members, this.values);
         }
         return hasMaterialValue(item, this.values);
       };
@@ -522,7 +505,7 @@ export class ESPHomeConfigEntryForm extends LitElement {
     const showControl =
       this.forceAdvancedControl || (hasAdvanced && !autoOpenAllAdvanced);
     const count = gatedAdvanced.length + this.advancedExtraCount;
-    return html`${this._renderConstraintBanners(ctx, plan.memberKeys)}${basic.map(
+    return html`${this._renderConstraintBanners(ctx, plan)}${basic.map(
       renderItem
     )}${inlineAdvanced.map(renderItem)}${
       showControl ? this._renderAdvancedControl(open, count, locked) : nothing
@@ -532,18 +515,13 @@ export class ESPHomeConfigEntryForm extends LitElement {
   /** Per-item renderer shared by both paint paths. An empty key means "this
    *  entry IS the whole values dict" (top-level user-keyed sections like
    *  ``substitutions:``); pass ``[]`` so the renderer sees the dict directly. */
-  private _makeItemRenderer(
-    plan: ReturnType<typeof buildFormRenderPlan>,
-    ctx: RenderCtx
-  ) {
+  private _makeItemRenderer(plan: FormRenderPlan, ctx: RenderCtx) {
     return (item: ConfigEntry | ConfigEntry[]) => {
-      if (Array.isArray(item)) return renderExclusiveGroupField(item, ctx);
+      if (Array.isArray(item))
+        return renderExclusiveGroupField(plan.groupPaints.get(item)!, ctx);
       if (plan.memberKeys.has(item.key)) {
-        const cluster = plan.clusterByFirstKey.get(item.key);
-        if (!cluster) return nothing;
-        return isRadioCluster(cluster)
-          ? renderConstraintRadioField(cluster, ctx)
-          : renderConstraintClusterField(cluster, ctx);
+        const paint = plan.clusterByFirstKey.get(item.key);
+        return paint ? renderConstraintCluster(paint, ctx) : nothing;
       }
       return plan.visible.has(item)
         ? this._renderEntry(item, item.key ? [item.key] : [], ctx)
@@ -567,9 +545,9 @@ export class ESPHomeConfigEntryForm extends LitElement {
   /** Classify a render unit as advanced. A group (exclusive dropdown or
    *  constraint cluster) is advanced only when *every* member is — a group
    *  renders atomically, so it can't straddle the basic/advanced boundary. */
-  private _advancedUnitClassifier(plan: ReturnType<typeof buildFormRenderPlan>) {
+  private _advancedUnitClassifier(plan: FormRenderPlan) {
     const clusterAllAdvanced = new Map<string, boolean>();
-    for (const cluster of plan.clusters) {
+    for (const { cluster } of plan.clusters) {
       const all = unitAllAdvanced(cluster.members);
       for (const m of cluster.members) clusterAllAdvanced.set(m.key, all);
     }
@@ -629,30 +607,12 @@ export class ESPHomeConfigEntryForm extends LitElement {
     fireEvent(this, "advanced-toggle", { show });
   }
 
-  /** Fallback banner for *unsatisfied* constraint groups that aren't visually
-   *  clustered (pure cardinality groups with no inclusive `group`). Groups
-   *  whose members render inside a `constraint-cluster` box are skipped — the
-   *  box header carries their prompt. */
-  private _renderConstraintBanners(ctx: RenderCtx, clusteredKeys: Set<string>) {
-    const unsatisfied = collectUnsatisfiedConstraints(
-      {
-        entries: this.entries,
-        requiredGroups: this.requiredGroups,
-        values: this.values,
-        presentComponents: this.presentComponents,
-        targetPlatform: ctx.board?.esphome.platform ?? null,
-        formatKeys: (keys) => formatConstraintKeys(keys, this.entries, ctx),
-      },
-      clusteredKeys
-    );
-    if (unsatisfied.length === 0) return nothing;
-    return unsatisfied.map(
-      ({ kind, keys }) => html`
-        <div class="warning-banner constraint-banner">
-          <wa-icon library="mdi" name="alert-circle-outline"></wa-icon>
-          <span>${ctx.localize(`device.constraint_${kind}`, { keys })}</span>
-        </div>
-      `
+  /** Fallback banner for the plan's unmet constraints no cluster box carries. */
+  private _renderConstraintBanners(ctx: RenderCtx, plan: FormRenderPlan) {
+    return renderConstraintBanners(
+      plan.unmet.filter((c) => c.source === "banner"),
+      this.entries,
+      ctx
     );
   }
 
@@ -672,15 +632,29 @@ export class ESPHomeConfigEntryForm extends LitElement {
    *  treated atomically (required if any member is) so its members stay
    *  contiguous and ``orderExclusiveGroups`` folds them at the same slot. */
   protected willUpdate(changed: PropertyValues) {
-    // A different entry list means the form was re-targeted to a
-    // different component (e.g. the dep-flow detour swapping
-    // ES7210 for i2c). Drop transient unit picks from the previous
-    // shape so they don't bleed into unrelated paths.
-    if (changed.has("entries") && changed.get("entries") !== undefined) {
-      this._pendingUnits.clear();
-      this._editingMagnitudes.clear();
-      this._openAdvancedPlacement.clear();
+    // The form was re-targeted to other entries (e.g. the dep-flow detour
+    // swapping ES7210 for i2c), or its values were read again from a YAML
+    // edited outside it: drop what could write a value at a path that may
+    // now be another field.
+    const previous = changed.get("entries") as ConfigEntry[] | undefined;
+    const retargeted = changed.has("entries") && previous !== undefined;
+    const reread = changed.has("valuesRead");
+    // A stash holds what the user typed on the side they left, so it is
+    // dropped for another target and for values read again from the YAML,
+    // not for the same target rebuilt.
+    if (reread || (retargeted && !sameEntryTarget(previous, this.entries))) {
+      clearTemplatableStash(this);
+      clearEnableStash(this);
+    }
+    if (reread || retargeted) {
+      this._valueMemory.clear();
       this._constraintClusters.reset();
+    }
+    // A pin's open Advanced panel writes under the pin; on a pin that is
+    // short form by now that write would drop the GPIO.
+    if (reread) closePinAdvanced(this._nestedOpenSections, this._seededNestedOpen);
+    if (retargeted) {
+      this._openAdvancedPlacement.clear();
       this._expandedOptionFields.clear();
       // Re-seed disclosures for the new component; a key like "pin:pin-advanced"
       // recurs across sections, and the form instance is reused.
@@ -815,46 +789,24 @@ export class ESPHomeConfigEntryForm extends LitElement {
       // A select holding the raw value as its own spelling never re-syncs,
       // so a late-mounting option list must always include the value's
       // option (the lazy id-reference list keeps the selected one mounted).
-      if (this._showsValue(current, raw)) continue;
+      if (current === raw || findOptionValue(value, [current]) !== null) continue;
       // wa-select filters its `value` against the exact string of an
-      // option's `value`; case mismatches between YAML and catalog
-      // would silently drop the value. Look up the matching option
-      // case-insensitively and feed wa-select the option's verbatim
-      // value so the lookup succeeds.
-      //
-      // Pin entries are a second mismatch: the seeded YAML value is
-      // a bare int (`9`, from `seedBoardPinDefaults` reading the
-      // board manifest's pin features) or a board spelling (`"P0.27"`,
-      // `"PB03"`) that differs from the option's. Normalise both sides
-      // through the shared pin parser so a freshly seeded i2c bus lands
-      // on the right option instead of showing an empty select.
-      const desired = this._matchOptionValue(select, raw);
+      // option's `value`; a case or bare-decimal mismatch between YAML and
+      // catalog would silently drop the value. Look up the matching option
+      // and feed wa-select the option's verbatim value so the lookup succeeds.
+      const desired = this._matchOptionValue(select, value) ?? raw;
       if (current !== desired) {
         select.value = desired;
       }
     }
   }
 
-  /** Whether a select's value is the raw value or its option spelling. */
-  private _showsValue(current: string, raw: string): boolean {
-    if (current === raw) return true;
-    if (!current || !raw) return false;
-    if (current.toLowerCase() === raw.toLowerCase()) return true;
-    const gpio = parseBoardGpio(raw);
-    return gpio !== null && parseBoardGpio(current) === gpio;
-  }
-
-  private _matchOptionValue(select: HTMLElement, raw: string): string {
-    if (!raw) return raw;
+  private _matchOptionValue(select: HTMLElement, value: unknown): string | null {
     const options = Array.from(
-      select.querySelectorAll<HTMLElement & { value: string }>("wa-option")
+      select.querySelectorAll<HTMLElement & { value: string }>("wa-option"),
+      (o) => o.value ?? ""
     );
-    const lower = raw.toLowerCase();
-    const exact = options.find((o) => o.value?.toLowerCase() === lower);
-    if (exact) return exact.value;
-    const gpio = parseBoardGpio(raw);
-    if (gpio === null) return raw;
-    return options.find((o) => parseBoardGpio(o.value) === gpio)?.value ?? raw;
+    return findOptionValue(value, options);
   }
 
   /**
@@ -1064,16 +1016,13 @@ export class ESPHomeConfigEntryForm extends LitElement {
    *  not once per render or per referencing field. */
   private _parseSubstitutions = memoizeOne(parseSubstitutions);
 
+  /** Walks the whole entry tree, so once per schema, not per render. */
+  private _constraintMemberPaths = memoizeOne(
+    (entries: ConfigEntry[], groups: RequiredGroup[]) =>
+      constraintMemberPaths(entries, groups)
+  );
+
   private _buildCtx(): RenderCtx {
-    // Top-level keys whose baked constraint prose a banner/cluster replaces;
-    // _fieldDescription strips only these so nested members keep their prose.
-    const reactiveConstraintKeys = new Set<string>();
-    for (const group of this.requiredGroups) {
-      for (const key of group.keys) reactiveConstraintKeys.add(key);
-    }
-    for (const entry of this.entries) {
-      if (entry.group) reactiveConstraintKeys.add(entry.key);
-    }
     const ctx: RenderCtx = {
       localize: this._localize,
       disabled: this.disabled,
@@ -1087,7 +1036,10 @@ export class ESPHomeConfigEntryForm extends LitElement {
       requiredOnly: this.requiredOnly,
       showAdvanced: this.showAdvanced,
       presentComponents: this.presentComponents,
-      reactiveConstraintKeys,
+      reactiveConstraintPaths: this._constraintMemberPaths(
+        this.entries,
+        this.requiredGroups
+      ),
       entries: this.entries,
       nestedOpenSections: this._nestedOpenSections,
       getAt: (path) => getIn(this.values, path),
@@ -1098,6 +1050,7 @@ export class ESPHomeConfigEntryForm extends LitElement {
       requestAddComponent: (domain) => this._requestAddComponent(domain),
       resolveInterfaceProviders: (interfaceName) =>
         this._resolveInterfaceProviders(interfaceName),
+      catalogById: () => this._catalogIndex.byId(),
       isOptionsExpanded: (path) => this._expandedOptionFields.has(fieldKeyAttr(path)),
       expandOptions: (path) => {
         const key = fieldKeyAttr(path);
@@ -1107,32 +1060,13 @@ export class ESPHomeConfigEntryForm extends LitElement {
       },
       scopeValues: (path) => this._scopeValues(path),
       filterRenderable: this._filterRenderable,
-      getPendingUnit: (path) => this._pendingUnits.get(path.join(".")),
-      setPendingUnit: (path, unit) => {
-        this._pendingUnits.set(path.join("."), unit);
-        // Trigger a re-render so the picker reflects the stash.
-        // Mutating the Map alone won't, since `_pendingUnits` isn't
-        // a `@state`-tracked field.
-        this.requestUpdate();
-      },
-      getEditingMagnitude: (path) => this._editingMagnitudes.get(path.join(".")),
-      setEditingMagnitude: (path, text) => {
-        // No requestUpdate — the @input handler that calls this
-        // also emits a value-change which re-renders us via the
-        // owner's normal value-prop update. Triggering here would
-        // double the work on every keystroke.
-        this._editingMagnitudes.set(path.join("."), text);
-      },
-      clearEditingMagnitude: (path) => {
-        this._editingMagnitudes.delete(path.join("."));
-      },
-      clearEditingMagnitudesUnder: (path) => {
-        const key = path.join(".");
-        const prefix = `${key}.`;
-        for (const k of [...this._editingMagnitudes.keys()]) {
-          if (k === key || k.startsWith(prefix)) this._editingMagnitudes.delete(k);
-        }
-      },
+      requiredGroups: this.requiredGroups,
+      ...this._valueMemory.ctx,
+      ...rowMemoryCtx(this, this._constraintClusters, this._expandedOptionFields, [
+        ...this._valueMemory.stores,
+        this._nestedOpenSections,
+        this._seededNestedOpen,
+      ]),
       getClusterChoice: (clusterId) => this._constraintClusters.getChoice(clusterId),
       setClusterChoice: (clusterId, altId) =>
         this._constraintClusters.setChoice(clusterId, altId),

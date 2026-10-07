@@ -1,0 +1,330 @@
+// @vitest-environment happy-dom
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  requestSerialPort: vi.fn(),
+  dispatchShowLogsAfterInstall: vi.fn(() => true),
+  flashAmbz2: vi.fn<(p: unknown, i: unknown, hooks: FlashHooks) => Promise<boolean>>(),
+}));
+type FlashHooks = {
+  onProgress: (p: number) => void;
+  onLog?: (line: string) => void;
+  onLinked?: () => void;
+  onWaiting?: () => void;
+  signal?: AbortSignal;
+};
+vi.mock("../../../src/util/web-serial.js", () => ({
+  requestSerialPort: mocks.requestSerialPort,
+}));
+vi.mock("../../../src/util/post-install-dispatch.js", () => ({
+  dispatchShowLogsAfterInstall: mocks.dispatchShowLogsAfterInstall,
+}));
+vi.mock("../../../src/platforms/rtl87xx/ambz2-flasher.js", () => ({
+  flashAmbz2: mocks.flashAmbz2,
+}));
+const seams = vi.hoisted(() => ({ loadAmbz2Image: vi.fn() }));
+vi.mock("../../../src/platforms/rtl87xx/index.js", async (importOriginal) => {
+  const real =
+    await importOriginal<typeof import("../../../src/platforms/rtl87xx/index.js")>();
+  seams.loadAmbz2Image.mockImplementation(real.loadAmbz2Image);
+  return { ...real, loadAmbz2Image: seams.loadAmbz2Image };
+});
+
+import { ltPartInfo, ltTag, makeLibreTinyUf2 } from "../../_make-libretiny-uf2.js";
+import { lapsedPick } from "../../_web-serial.js";
+import type { ConfiguredDevice } from "../../../src/api/types/devices.js";
+import type { FirmwareBinary } from "../../../src/api/types/firmware-jobs.js";
+import { type LibreTinyImage, LT_TAG } from "../../../src/platforms/libretiny-uf2.js";
+import { UF2_FAMILY_AMBZ } from "../../../src/platforms/rtl87xx/ambz2-image.js";
+import {
+  rtlAmbz2Install,
+  rtlDoFlash,
+  rtlImage,
+  startRtlAmbz2Install,
+} from "../../../src/platforms/rtl87xx/ambz2-install.js";
+import { SerialDeviceLostError } from "../../../src/util/serial-open-error.js";
+import {
+  asHost,
+  bin,
+  makeFlashHost,
+} from "../../components/firmware-install-dialog/_flash-host.js";
+
+const bootInfo = [ltTag(LT_TAG.OTA_PART_INFO, ltPartInfo([0, 0, 0, 0, 1, 1], ["boot"]))];
+const uf2 = (family?: number | null): ArrayBuffer =>
+  makeLibreTinyUf2({ family, blocks: [{ addr: 0, tags: bootInfo }] }).buffer;
+
+const device = {
+  configuration: "bw15.yaml",
+  name: "bw15",
+  target_platform: "rtl87xx",
+} as ConfiguredDevice;
+const image: LibreTinyImage = {
+  familyId: 0xe08f7564,
+  board: "bw15",
+  runs: [{ address: 0x4000, data: new Uint8Array(256) }],
+  totalBytes: 256,
+};
+
+function makeHost(opts: { binaries?: FirmwareBinary[]; uf2?: ArrayBuffer } = {}) {
+  return makeFlashHost(
+    device,
+    {
+      binaries: opts.binaries ?? [
+        bin("firmware.uf2", "uf2"),
+        bin("image_firmware_is.0x00C000.bin"),
+      ],
+      downloadBytes: opts.uf2 ?? uf2(),
+    },
+    {
+      _logsPort: null as SerialPort | null,
+      _open: true,
+      _showLogsAfterInstall: false,
+    }
+  );
+}
+type Host = ReturnType<typeof makeHost>;
+
+function readyHost(): Host {
+  const host = makeHost();
+  rtlImage.set(asHost(host), image);
+  host._binaries = [bin("firmware.uf2", "uf2")];
+  host._step = "rtl-ready";
+  return host;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("startRtlAmbz2Install", () => {
+  it("compiles, picks the UF2 by type, parses it and lands on the ready step", async () => {
+    const host = makeHost();
+    await startRtlAmbz2Install(asHost(host));
+    expect(host._api.firmwareDownloadBytes).toHaveBeenCalledWith(
+      "bw15.yaml",
+      "firmware.uf2"
+    );
+    expect(rtlImage.get(asHost(host))?.runs.map((r) => r.address)).toEqual([0x4000]);
+    expect(host._binaries.map((b) => b.file)).toEqual(["firmware.uf2"]);
+    expect(host._step).toBe("rtl-ready");
+    expect(host._statusMessage).toBe("firmware.rtl_ready_title");
+  });
+
+  it("loads the parser after the download and names a failed chunk fetch", async () => {
+    const host = makeHost();
+    seams.loadAmbz2Image.mockResolvedValueOnce({
+      key: "firmware.engine_load_failed",
+      detail: "Failed to fetch",
+    });
+    await startRtlAmbz2Install(asHost(host));
+    expect(host._statusMessage).toBe("firmware.engine_load_failed");
+    expect(rtlImage.get(asHost(host))).toBeNull();
+    expect(
+      vi.mocked(host._api.firmwareDownloadBytes).mock.invocationCallOrder[0]
+    ).toBeLessThan(seams.loadAmbz2Image.mock.invocationCallOrder[0]);
+  });
+
+  it("names an empty build by the flow that asked for it", async () => {
+    const inApp = makeHost({ binaries: [] });
+    await startRtlAmbz2Install(asHost(inApp));
+    expect(inApp._statusMessage).toBe("firmware.no_binaries");
+
+    // The hand-off to web.esphome.io reads through the same download.
+    const handoff = makeHost({ binaries: [] });
+    Object.assign(handoff, { _installer: "web-flash" });
+    await startRtlAmbz2Install(asHost(handoff));
+    expect(handoff._statusMessage).toBe("firmware.no_flashable_binary");
+  });
+
+  it("fails when the build produced no UF2", async () => {
+    const host = makeHost({ binaries: [bin("image_firmware_is.0x00C000.bin")] });
+    await startRtlAmbz2Install(asHost(host));
+    expect(host._statusMessage).toBe("firmware.no_uf2");
+    expect(host._api.firmwareDownloadBytes).not.toHaveBeenCalled();
+  });
+
+  it("refuses an AmebaZ (RTL8710B) image as the wrong family", async () => {
+    const host = makeHost({ uf2: uf2(UF2_FAMILY_AMBZ) });
+    await startRtlAmbz2Install(asHost(host));
+    expect(host._statusMessage).toBe("firmware.rtl_wrong_family");
+    expect(host._errorMessage).toContain("0x22e0d6fc");
+    expect(rtlImage.get(asHost(host))).toBeNull();
+  });
+
+  it("treats a malformed file as a bad UF2", async () => {
+    const host = makeHost({ uf2: new Uint8Array(512).buffer });
+    await startRtlAmbz2Install(asHost(host));
+    expect(host._statusMessage).toBe("firmware.rtl_bad_uf2");
+  });
+
+  it("leaves a dialog that moved to another device untouched", async () => {
+    const host = makeHost();
+    vi.mocked(host._api.firmwareDownloadBytes).mockImplementation(async () => {
+      host._device = { ...device, configuration: "other.yaml" } as ConfiguredDevice;
+      return uf2();
+    });
+    await startRtlAmbz2Install(asHost(host));
+    expect(rtlImage.get(asHost(host))).toBeNull();
+    expect(host._step).not.toBe("rtl-ready");
+  });
+});
+
+describe("rtlDoFlash", () => {
+  it("does nothing when the port picker is dismissed", async () => {
+    const host = readyHost();
+    mocks.requestSerialPort.mockResolvedValue(null);
+    await rtlDoFlash(asHost(host));
+    expect(host._step).toBe("rtl-ready");
+    expect(host._flashBusy).toBe(false);
+    expect(mocks.flashAmbz2).not.toHaveBeenCalled();
+  });
+
+  it("ignores a second click while the picker is open", async () => {
+    const host = readyHost();
+    host._flashBusy = true;
+    await rtlDoFlash(asHost(host));
+    expect(mocks.requestSerialPort).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed picker", async () => {
+    const host = readyHost();
+    mocks.requestSerialPort.mockRejectedValue(new Error("no serial"));
+    await rtlDoFlash(asHost(host));
+    expect(host._statusMessage).toBe("firmware.browser_flash_connect_failed");
+    expect(host._errorMessage).toBe("no serial");
+
+    mocks.requestSerialPort.mockRejectedValue(lapsedPick());
+    await rtlDoFlash(asHost(host));
+    expect(host._errorMessage).toBe("serial.picker_needs_click");
+  });
+
+  it("walks the connect, strap-wait, flashing and done steps with the engine's hooks", async () => {
+    const host = readyHost();
+    const port = {};
+    const steps: string[] = [];
+    mocks.requestSerialPort.mockResolvedValue(port);
+    mocks.flashAmbz2.mockImplementation(async (_p, _i, hooks) => {
+      steps.push(host._step);
+      hooks.onLog?.("Writing 0xC000 (1 bytes)");
+      hooks.onWaiting?.();
+      steps.push(host._step);
+      hooks.onLinked?.();
+      steps.push(host._step);
+      hooks.onProgress(40);
+      hooks.onProgress(100);
+      return true;
+    });
+    await rtlDoFlash(asHost(host));
+    expect(mocks.flashAmbz2).toHaveBeenCalledWith(
+      port,
+      image,
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    expect(steps).toEqual(["rtl-connect", "rtl-wait", "flashing"]);
+    expect(host._log.lines).toContain("Writing 0xC000 (1 bytes)");
+    expect(host._flashPercent).toBe(100);
+    expect(host._step).toBe("done");
+    expect(host._statusMessage).toBe("firmware.status_done");
+    expect(host._flashAbort).toBeNull();
+  });
+
+  it("keeps the flashed port for Show logs and flips to logs when asked", async () => {
+    const host = readyHost();
+    const port = {};
+    mocks.requestSerialPort.mockResolvedValue(port);
+    mocks.flashAmbz2.mockResolvedValue(true);
+    host._showLogsAfterInstall = true;
+    await rtlDoFlash(asHost(host));
+    expect(host._logsPort).toBe(port);
+    expect(mocks.dispatchShowLogsAfterInstall).toHaveBeenCalledWith(
+      host,
+      expect.objectContaining({ webSerialPort: port, targetPlatform: "rtl87xx" })
+    );
+    expect(host._open).toBe(false);
+  });
+
+  it.each([
+    { show: false, open: true, rebooted: true, why: "not asked" },
+    { show: true, open: false, rebooted: true, why: "dismissed mid-flash" },
+    {
+      show: true,
+      open: true,
+      rebooted: false,
+      why: "the manual-reset notice is showing",
+    },
+  ])("does not flip to logs when $why", async ({ show, open, rebooted }) => {
+    const host = readyHost();
+    host._showLogsAfterInstall = show;
+    host._open = open;
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashAmbz2.mockResolvedValue(rebooted);
+    await rtlDoFlash(asHost(host));
+    expect(host._step).toBe("done");
+    expect(mocks.dispatchShowLogsAfterInstall).not.toHaveBeenCalled();
+  });
+
+  it("asks for a manual reset when the adapter could not reboot the board", async () => {
+    const host = readyHost();
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashAmbz2.mockResolvedValue(false);
+    await rtlDoFlash(asHost(host));
+    expect(host._step).toBe("done");
+    expect(host._statusMessage).toBe("firmware.rtl_done_manual_reset");
+  });
+
+  it("drops a late log line once the dialog moved on", async () => {
+    const host = readyHost();
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashAmbz2.mockImplementation(async (_p, _i, hooks) => {
+      host._device = { name: "other" } as never;
+      hooks.onLog?.("Writing 0xC000 (1 bytes)");
+      return true;
+    });
+    await rtlDoFlash(asHost(host));
+    expect(host._log.lines).not.toContain("Writing 0xC000 (1 bytes)");
+  });
+
+  it("reports a failed flash with the engine's reason", async () => {
+    const host = readyHost();
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashAmbz2.mockRejectedValue(
+      new Error("Flash contents at 0xc000 do not match")
+    );
+    await rtlDoFlash(asHost(host));
+    expect(host._step).toBe("error");
+    expect(host._statusMessage).toBe("firmware.rtl_flash_failed");
+    expect(host._errorMessage).toContain("0xc000");
+  });
+
+  it("names a board that was unplugged during the flash", async () => {
+    const host = readyHost();
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashAmbz2.mockRejectedValue(new SerialDeviceLostError());
+    await rtlDoFlash(asHost(host));
+    expect(host._statusMessage).toBe("firmware.rtl_flash_failed");
+    expect(host._errorMessage).toBe("serial.device_lost");
+  });
+
+  it("stays silent when the dialog was torn down during the flash", async () => {
+    const host = readyHost();
+    mocks.requestSerialPort.mockResolvedValue({});
+    mocks.flashAmbz2.mockImplementation(async () => {
+      host._device = null;
+      host._flashAbort?.abort();
+      throw new DOMException("aborted", "AbortError");
+    });
+    await rtlDoFlash(asHost(host));
+    expect(host._step).toBe("rtl-connect");
+    expect(host._errorMessage).toBe("");
+  });
+});
+
+describe("rtlAmbz2Install", () => {
+  it("goes back to the ready step as the Retry target", () => {
+    const host = readyHost();
+    host._step = "error";
+    rtlAmbz2Install.showFirstStep(asHost(host));
+    expect(host._step).toBe("rtl-ready");
+    expect(host._statusMessage).toBe("firmware.rtl_ready_title");
+  });
+});

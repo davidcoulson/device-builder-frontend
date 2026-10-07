@@ -14,7 +14,7 @@
  * because the shape is renderer-specific (RenderCtx is private
  * to ``components/device``).
  */
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 import {
   extractAttributeBindings,
   findTemplatesByAnchor,
@@ -23,6 +23,7 @@ import type { BoardCatalogEntry, BoardPin } from "../../../src/api/types/boards.
 import type { ConfigEntry } from "../../../src/api/types/config-entries.js";
 import { ConfigEntryType } from "../../../src/api/types/config-entries.js";
 import type { RenderCtx } from "../../../src/components/device/config-entry-renderers-shared.js";
+import { getIn } from "../../../src/util/nested-values.js";
 import { parseSubstitutions } from "../../../src/util/substitutions.js";
 
 /** Build a minimal ``BoardPin``. Defaults to a generic
@@ -110,18 +111,26 @@ export function makeRenderCtx(
     seedNestedOpen: vi.fn(),
     requestAddComponent: vi.fn(),
     resolveInterfaceProviders: () => [],
+    catalogById: () => null,
     isOptionsExpanded: () => true,
     expandOptions: vi.fn(),
-    scopeValues: () => ({}),
+    // As the form does: the mapping at *path*, else an empty scope.
+    scopeValues: (path: string[]) => {
+      const at = getIn(values as Record<string, unknown>, path);
+      return at && typeof at === "object" && !Array.isArray(at)
+        ? (at as Record<string, unknown>)
+        : {};
+    },
     filterRenderable: (entries) => entries,
+    requiredGroups: [],
     renderEntry: vi.fn(),
     getPendingUnit: () => undefined,
     setPendingUnit: vi.fn(),
     getEditingMagnitude: () => undefined,
     setEditingMagnitude: vi.fn(),
     clearEditingMagnitude: vi.fn(),
-    clearEditingMagnitudesUnder: vi.fn(),
-    reactiveConstraintKeys: new Set<string>(),
+    rowsMoved: vi.fn(),
+    reactiveConstraintPaths: new Set<string>(),
     getClusterChoice: () => undefined,
     setClusterChoice: vi.fn(),
     getClusterStash: () => undefined,
@@ -196,4 +205,15 @@ export function makeEmitCtx(
     overrides: { emitChange, ...overrides },
   });
   return { ctx, emitChange };
+}
+
+/** Where the one ``rowsMoved`` call on *ctx* sends rows 0..*rows*-1. */
+export function reportedRowMoves(
+  ctx: RenderCtx,
+  rows: number
+): [string[], (number | null)[]] {
+  const calls = vi.mocked(ctx.rowsMoved).mock.calls;
+  expect(calls).toHaveLength(1);
+  const [path, move] = calls[0];
+  return [path, Array.from({ length: rows }, (_, row) => move(row))];
 }

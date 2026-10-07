@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  addFormHasUnsatisfiedConstraint,
   addFormNeedsUserInput,
   addFormRenderablePaths,
 } from "../../../src/components/device/add-component-form-filter.js";
@@ -125,6 +126,7 @@ describe("addFormRenderablePaths resolves a root-scoped depends_on", () => {
     const paths = addFormRenderablePaths(
       entries,
       { variant: "esp32", advanced: {} },
+      [],
       null,
       NONE
     );
@@ -135,9 +137,233 @@ describe("addFormRenderablePaths resolves a root-scoped depends_on", () => {
     const paths = addFormRenderablePaths(
       entries,
       { variant: "esp32c2", advanced: {} },
+      [],
       null,
       NONE
     );
     expect(paths.has("advanced.sram1_as_iram")).toBe(false);
+  });
+});
+
+describe("a required group whose members are all optional", () => {
+  // spi: clk_pin is required, miso_pin / mosi_pin are optional but the schema
+  // demands at least one of them; both are gated on the default `type`.
+  const gated = { depends_on: "type", depends_on_value_any: ["single"] };
+  const entries = [
+    makeConfigEntry({ key: "type", default_value: "single" }),
+    makeConfigEntry({ key: "clk_pin", required: true }),
+    makeConfigEntry({ key: "miso_pin", ...gated }),
+    makeConfigEntry({ key: "mosi_pin", ...gated }),
+  ];
+  const groups = [{ kind: "at_least_one" as const, keys: ["miso_pin", "mosi_pin"] }];
+
+  it("paints the members so the group can be satisfied", () => {
+    const paths = addFormRenderablePaths(entries, {}, groups, null, NONE);
+    expect([...paths].sort()).toEqual(["clk_pin", "miso_pin", "mosi_pin"]);
+  });
+
+  it("keeps them painted once one is set", () => {
+    const paths = addFormRenderablePaths(
+      entries,
+      { miso_pin: "GPIO7" },
+      groups,
+      null,
+      NONE
+    );
+    expect(paths.has("miso_pin")).toBe(true);
+    expect(paths.has("mosi_pin")).toBe(true);
+  });
+
+  it("drops them when their gate hides them", () => {
+    const paths = addFormRenderablePaths(entries, { type: "quad" }, groups, null, NONE);
+    expect([...paths]).toEqual(["clk_pin"]);
+  });
+
+  it("reports the group unsatisfied until a member is set", () => {
+    const unmet = (values: Record<string, unknown>) =>
+      addFormHasUnsatisfiedConstraint(entries, values, groups, null, NONE);
+    expect(unmet({ clk_pin: "GPIO6" })).toBe(true);
+    expect(unmet({ clk_pin: "GPIO6", mosi_pin: "GPIO7" })).toBe(false);
+    expect(unmet({ clk_pin: "GPIO6", type: "quad" })).toBe(false);
+  });
+
+  it("leaves an at_most_one group's optional members hidden", () => {
+    const atMost = [{ kind: "at_most_one" as const, keys: ["miso_pin", "mosi_pin"] }];
+    const paths = addFormRenderablePaths(entries, {}, atMost, null, NONE);
+    expect([...paths]).toEqual(["clk_pin"]);
+  });
+});
+
+describe("a required group whose members are blocks with no required child", () => {
+  // emc2101: exactly one of two optional NESTED blocks whose children are all
+  // optional. Each paints as a block with an enable switch.
+  const entries = [
+    makeNestedEntry("pwm", [makeConfigEntry({ key: "resolution", default_value: "23" })]),
+    makeNestedEntry("dac", [
+      makeConfigEntry({ key: "conversion_rate", default_value: "16" }),
+    ]),
+  ];
+  const groups = [{ kind: "exactly_one" as const, keys: ["pwm", "dac"] }];
+
+  it("paints the blocks so one can be switched on", () => {
+    const paths = addFormRenderablePaths(entries, {}, groups, null, NONE);
+    expect([...paths].sort()).toEqual(["dac", "pwm"]);
+  });
+
+  it("holds Add until exactly one block is set", () => {
+    const unmet = (values: Record<string, unknown>) =>
+      addFormHasUnsatisfiedConstraint(entries, values, groups, null, NONE);
+    expect(unmet({})).toBe(true);
+    expect(unmet({ pwm: { resolution: 23 } })).toBe(false);
+    expect(unmet({ pwm: { resolution: 23 }, dac: { conversion_rate: "16" } })).toBe(true);
+  });
+});
+
+describe("a required group the add form cannot paint", () => {
+  it("does not hold Add on a group whose members are all advanced", () => {
+    const advanced = [
+      makeConfigEntry({ key: "a", advanced: true }),
+      makeConfigEntry({ key: "b", advanced: true }),
+    ];
+    const atLeast = [{ kind: "at_least_one" as const, keys: ["a", "b"] }];
+    expect(addFormHasUnsatisfiedConstraint(advanced, {}, atLeast, null, NONE)).toBe(
+      false
+    );
+  });
+});
+
+describe("an unmet constraint cluster box", () => {
+  // wifi eap: at least one of identity / certificate, where certificate and
+  // key share an inclusive group, so the three render as one cluster box whose
+  // header carries the warning instead of a banner.
+  const members = (over: Record<string, unknown> = {}) => [
+    makeConfigEntry({ key: "identity", ...over }),
+    makeConfigEntry({ key: "certificate", group: "cert_and_key", ...over }),
+    makeConfigEntry({ key: "key", group: "cert_and_key", ...over }),
+  ];
+  const groups = [{ kind: "at_least_one" as const, keys: ["identity", "certificate"] }];
+  const unmet = (entries: ReturnType<typeof members>, values: Record<string, unknown>) =>
+    addFormHasUnsatisfiedConstraint(entries, values, groups, null, NONE);
+
+  it("holds Add until the cardinality rule is met", () => {
+    expect(unmet(members(), {})).toBe(true);
+    expect(unmet(members(), { identity: "me" })).toBe(false);
+  });
+
+  it("holds Add while the all-or-none pair is half set", () => {
+    expect(unmet(members(), { certificate: "cert.pem" })).toBe(true);
+    expect(unmet(members(), { certificate: "cert.pem", key: "key.pem" })).toBe(false);
+  });
+
+  it("does not hold Add when every member is board-locked", () => {
+    expect(unmet(members({ locked: true }), {})).toBe(false);
+  });
+
+  it("holds Add on an all-advanced box, which the flat paint still draws", () => {
+    expect(unmet(members({ advanced: true }), {})).toBe(true);
+  });
+
+  it("leaves an exactly_one radio cluster to its forced choice", () => {
+    const radio = [{ kind: "exactly_one" as const, keys: ["identity", "certificate"] }];
+    expect(addFormHasUnsatisfiedConstraint(members(), {}, radio, null, NONE)).toBe(false);
+  });
+
+  it("holds Add on a radio that paints as a box because one side is hidden", () => {
+    const radio = [{ kind: "exactly_one" as const, keys: ["identity", "certificate"] }];
+    const oneSide = members().map((m) =>
+      m.key === "identity" ? { ...m, hidden: true } : m
+    );
+    expect(addFormHasUnsatisfiedConstraint(oneSide, {}, radio, null, NONE)).toBe(true);
+    expect(
+      addFormHasUnsatisfiedConstraint(
+        oneSide,
+        { certificate: "cert.pem", key: "key.pem" },
+        radio,
+        null,
+        NONE
+      )
+    ).toBe(false);
+  });
+
+  it("holds Add on a half-set pair whose set member is hidden by depends_on", () => {
+    const gated = members().map((m) =>
+      m.key === "certificate"
+        ? { ...m, depends_on: "identity", depends_on_value: "x" }
+        : m
+    );
+    expect(
+      addFormHasUnsatisfiedConstraint(
+        gated,
+        { certificate: "cert.pem" },
+        groups,
+        null,
+        NONE
+      )
+    ).toBe(true);
+  });
+});
+
+describe("a cluster box whose members are blocks", () => {
+  // At least one of fan / pwm, where pwm and dac share an inclusive group, so
+  // the three blocks render as one cluster box.
+  const blocks = (child: Record<string, unknown>) => [
+    makeNestedEntry("fan", [makeConfigEntry({ key: "speed", ...child })]),
+    {
+      ...makeNestedEntry("pwm", [makeConfigEntry({ key: "divider", ...child })]),
+      group: "out",
+    },
+    {
+      ...makeNestedEntry("dac", [makeConfigEntry({ key: "rate", ...child })]),
+      group: "out",
+    },
+  ];
+  const groups = [{ kind: "at_least_one" as const, keys: ["fan", "pwm"] }];
+
+  it("holds Add while a block's switch can satisfy it", () => {
+    expect(
+      addFormHasUnsatisfiedConstraint(
+        blocks({ default_value: "1" }),
+        {},
+        groups,
+        null,
+        NONE
+      )
+    ).toBe(true);
+  });
+
+  it("holds Add on a radio of blocks until the picked one is switched on", () => {
+    const radio = [{ kind: "exactly_one" as const, keys: ["fan", "pwm"] }];
+    const unmet = (values: Record<string, unknown>) =>
+      addFormHasUnsatisfiedConstraint(
+        blocks({ default_value: "1" }),
+        values,
+        radio,
+        null,
+        NONE
+      );
+    expect(unmet({})).toBe(true);
+    expect(unmet({ fan: {} })).toBe(true);
+    expect(unmet({ fan: { speed: "1" } })).toBe(false);
+  });
+
+  it("does not hold Add on blocks with no field and nothing to switch on", () => {
+    expect(addFormHasUnsatisfiedConstraint(blocks({}), {}, groups, null, NONE)).toBe(
+      false
+    );
+  });
+});
+
+describe("an unmet banner whose painted members are all board-locked", () => {
+  it("does not hold Add, since nothing on screen can be changed", () => {
+    const entries = [
+      makeConfigEntry({ key: "a", locked: true }),
+      makeConfigEntry({ key: "b", locked: true }),
+    ];
+    const groups = [{ kind: "exactly_one" as const, keys: ["a", "b"] }];
+    const values = { a: "x", b: "y" };
+    expect(addFormRenderablePaths(entries, values, groups, null, NONE).size).toBe(2);
+    expect(addFormHasUnsatisfiedConstraint(entries, values, groups, null, NONE)).toBe(
+      false
+    );
   });
 });

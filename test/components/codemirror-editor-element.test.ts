@@ -2,15 +2,16 @@
  * @vitest-environment happy-dom
  *
  * Pins the shared CodeMirror host lifecycle: `_mountView` builds a live
- * EditorView into `.cm-wrap`, and `_destroyView` / `disconnectedCallback`
- * tear it down.
+ * EditorView into `.cm-wrap`, `_destroyView` tears it down, a detach that
+ * lasts tears it down too, and a move keeps it.
  */
+import { history, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 import { html } from "lit";
 import { customElement } from "lit/decorators.js";
 import { describe, expect, it } from "vitest";
 
-import { mount } from "../_dom.js";
+import { flushMicrotasks, mount } from "../_dom.js";
 import { CodeMirrorEditorElement } from "../../src/components/codemirror-editor-element.js";
 
 @customElement("test-cm-editor")
@@ -19,8 +20,10 @@ class TestCmEditor extends CodeMirrorEditorElement {
     return html`<div class="cm-wrap"></div>`;
   }
 
-  protected firstUpdated() {
-    this._mountView("hello\nworld\n", []);
+  doc = "hello\nworld\n";
+
+  protected _mountEditor() {
+    this._mountView(this.doc, [history()]);
   }
 
   get view(): EditorView | null {
@@ -65,9 +68,49 @@ describe("CodeMirrorEditorElement", () => {
     expect(el.container.querySelectorAll(".cm-editor").length).toBe(1);
   });
 
-  it("tears the view down when disconnected", async () => {
+  it("tears the view down once a disconnect outlasts the microtask checkpoint", async () => {
     const el = await mount(new TestCmEditor());
     el.remove();
+    expect(el.view).not.toBeNull();
+    await flushMicrotasks(1);
+    expect(el.view).toBeNull();
+  });
+
+  it("keeps the view, and what it holds, when the element is moved synchronously", async () => {
+    const el = await mount(new TestCmEditor());
+    const first = el.view!;
+    first.dispatch({
+      changes: { from: 0, insert: "typed " },
+      selection: { anchor: 2, head: 5 },
+    });
+    const elsewhere = document.createElement("div");
+    document.body.appendChild(elsewhere);
+
+    elsewhere.appendChild(el);
+    await flushMicrotasks(1);
+
+    expect(el.view).toBe(first);
+    expect(el.view!.state.doc.toString()).toBe("typed hello\nworld\n");
+    expect(el.view!.state.selection.main.toJSON()).toEqual({ anchor: 2, head: 5 });
+    expect(el.container.querySelectorAll(".cm-editor").length).toBe(1);
+    // The edit made before the move is still on the undo stack.
+    expect(undo(el.view!)).toBe(true);
+    expect(el.view!.state.doc.toString()).toBe("hello\nworld\n");
+  });
+
+  it("mounts from the current properties on a reconnect", async () => {
+    const el = await mount(new TestCmEditor());
+    el.remove();
+    await flushMicrotasks(1);
+    el.doc = "changed while detached";
+    document.body.appendChild(el);
+    expect(el.view!.state.doc.toString()).toBe("changed while detached");
+  });
+
+  it("does not mount before the first render", () => {
+    const el = new TestCmEditor();
+    document.body.appendChild(el);
+    // firstUpdated has not run yet, so there is no host to mount into.
     expect(el.view).toBeNull();
   });
 });

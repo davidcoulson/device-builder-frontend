@@ -2,8 +2,7 @@ import { mdiContentCopy } from "@mdi/js";
 import { html, nothing, type TemplateResult } from "lit";
 import type { IdentityView } from "../../api/types/remote-build.js";
 import type { LocalizeFunc } from "../../common/localize.js";
-import { copyToClipboard } from "../../util/copy-to-clipboard.js";
-import { notify } from "../../util/notify.js";
+import { copyAddressToClipboard } from "../../util/copy-address.js";
 import { formatHostPort, pairingAddress } from "../../util/pairing-address.js";
 import { registerMdiIcons } from "../../util/register-icons.js";
 
@@ -72,9 +71,27 @@ async function _copyAddress(
   // Inside <summary>, a plain click would also toggle the disclosure.
   e.preventDefault();
   e.stopPropagation();
-  if (await copyToClipboard(value)) {
-    notify.success(localize("settings.remote_build_address_copied"));
-  } else {
-    notify.warning(localize("settings.remote_build_address_copy_failed"));
-  }
+  await copyAddressToClipboard(localize, value);
+}
+
+/**
+ * An address the user needs elsewhere (a browser-internal page, say, which
+ * no link can open): the whole line is one click to copy. Pair with
+ * `pairingAddressStyles`.
+ */
+export function renderCopyAddress(localize: LocalizeFunc, value: string): TemplateResult {
+  return html`
+    <button
+      type="button"
+      class="copy-address"
+      aria-label=${localize("settings.remote_build_address_copy_aria", {
+        address: value,
+      })}
+      title=${localize("settings.remote_build_address_copy")}
+      @click=${() => void copyAddressToClipboard(localize, value)}
+    >
+      <code>${value}</code>
+      <wa-icon library="mdi" name="content-copy"></wa-icon>
+    </button>
+  `;
 }

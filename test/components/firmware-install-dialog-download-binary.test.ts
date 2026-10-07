@@ -12,17 +12,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { triggerDownload } = vi.hoisted(() => ({ triggerDownload: vi.fn() }));
 vi.mock("../../src/util/download-text.js", () => ({ triggerDownload }));
-vi.mock("../../src/util/web-serial.js", () => ({
+vi.mock("../../src/util/web-serial.js", () => ({}));
+vi.mock("../../src/platforms/esp/esptool.js", () => ({
   connectToPort: vi.fn(),
-  detectChip: vi.fn(),
   disconnect: vi.fn(),
   flashFirmware: vi.fn(),
   resetAndDisconnect: vi.fn(),
-  SERIAL_ACTIVITY_WINDOW_MS: 6000,
 }));
 
 import { identityLocalize } from "../_dom.js";
-import { fakeLogBuffer } from "../_fake-host.js";
+import { fakeBuildState, fakeLogBuffer } from "../_fake-host.js";
 import {
   type FirmwareBinary,
   JobSource,
@@ -73,9 +72,10 @@ function makeHost(installer: Installer, binaries: FirmwareBinary[]) {
     _streamId: "",
     _jobSource: JobSource.LOCAL,
     _jobSourceLabel: "",
+    _open: true,
+    _installRun: 0,
     _compileReject: null as null | ((e: unknown) => void),
-    _activeJobs: new Map<string, unknown>(),
-    _timer: { noteLine: vi.fn() },
+    ...fakeBuildState(),
     _localize: identityLocalize,
     _fail: vi.fn(),
   };

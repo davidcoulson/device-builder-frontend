@@ -5,12 +5,13 @@ vi.mock("../../src/util/web-serial.js", () => ({
   isPortPickerCancel: vi.fn(() => false),
   webSerialAvailability: vi.fn(() => "available"),
 }));
-vi.mock("../../src/web/install/run-flash.js", () => ({ runFlash: vi.fn() }));
+vi.mock("../../src/web/platforms/esp/run-flash.js", () => ({ runFlash: vi.fn() }));
 vi.mock("../../src/web/dashboard/esphome-web-card.js", () => ({}));
 vi.mock("@home-assistant/webawesome/dist/components/spinner/spinner.js", () => ({}));
 vi.mock("../../src/components/ansi-log.js", () => ({}));
 vi.mock("sonner-js", () => ({ default: { error: vi.fn() } }));
-vi.mock("../../src/web/logs/esphome-web-logs-dialog.js", () => ({
+vi.mock("../../src/web/logs/esphome-web-logs-dialog.js", () => ({}));
+vi.mock("../../src/web/logs/open-port-for-logs.js", () => ({
   openPortForLogs: vi.fn(async () => true),
 }));
 
@@ -21,8 +22,10 @@ vi.mock("../../src/web/flash-receiver/live-log-port.js", () => ({
 
 import toast from "sonner-js";
 
+import { ESP_SERIAL_LOGS } from "../../src/platforms/esp/serial-logs.js";
+import { acquireBootLogs } from "../../src/web/flash-receiver/boot-logs.js";
 import { ESPHomeWebFlashReceiver } from "../../src/web/flash-receiver/esphome-web-flash-receiver.js";
-import { openPortForLogs } from "../../src/web/logs/esphome-web-logs-dialog.js";
+import { openPortForLogs } from "../../src/web/logs/open-port-for-logs.js";
 import { makeWebSerialPort as makePort } from "./_make-web-serial-port.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -41,6 +44,30 @@ afterEach(() => {
 });
 
 describe("esphome-web-flash-receiver boot logs hand-off", () => {
+  it.each([
+    { carried: 9600, opened: 9600 },
+    { carried: undefined, opened: 115200 },
+  ])("opens the boot logs at $opened for a hand-off baud of $carried", async (c) => {
+    const el = await mount();
+    if (c.carried) (el as any)._logBaudRate = c.carried;
+    openLiveLogPort.mockResolvedValue({ port: makePort(), error: null });
+
+    await acquireBootLogs(el as any, {} as SerialPort, []);
+
+    expect(openLiveLogPort.mock.calls[0][2]).toBe(c.opened);
+  });
+
+  it("keeps the hand-off's baud for the Logs button", async () => {
+    const el = await mount();
+    const port = makePort();
+    (el as any)._logBaudRate = 9600;
+    (el as any)._logPort = port;
+
+    await (el as any)._onViewLogs();
+
+    expect(vi.mocked(openPortForLogs).mock.calls[0][3]).toBe(9600);
+  });
+
   it("opens the logs dialog immediately and hands it the acquired port", async () => {
     const el = await mount();
     const port = makePort();
@@ -50,7 +77,7 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
       return { port, error: null };
     });
 
-    await (el as any)._openBootLogs({}, []);
+    await acquireBootLogs(el as any, {} as SerialPort, []);
 
     expect((el as any)._logPort).toBe(port);
     expect((el as any)._logsOpen).toBe(true);
@@ -72,7 +99,7 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
       return { port, error: null };
     });
 
-    await (el as any)._openBootLogs({}, []);
+    await acquireBootLogs(el as any, {} as SerialPort, []);
 
     expect(port.close).toHaveBeenCalledOnce();
     expect((el as any)._logPort).toBe(port);
@@ -83,7 +110,7 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
     const el = await mount();
     openLiveLogPort.mockResolvedValue({ port: null, error: "gone" });
 
-    await (el as any)._openBootLogs({}, []);
+    await acquireBootLogs(el as any, {} as SerialPort, []);
 
     expect((el as any)._logsOpen).toBe(false);
     expect(toast.error).toHaveBeenCalledOnce();
@@ -100,7 +127,7 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
     });
     openLiveLogPort.mockResolvedValue({ port, error: null });
 
-    await (el as any)._openBootLogs({}, []);
+    await acquireBootLogs(el as any, {} as SerialPort, []);
 
     expect(port.close).toHaveBeenCalledOnce();
     expect((el as any)._logPort).toBe(port);
@@ -115,7 +142,7 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
     });
     openLiveLogPort.mockResolvedValue({ port, error: null });
 
-    await (el as any)._openBootLogs({}, []);
+    await acquireBootLogs(el as any, {} as SerialPort, []);
 
     expect(port.close).toHaveBeenCalledOnce();
     expect((el as any)._logPort).toBeUndefined();
@@ -129,7 +156,7 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
     });
     openLiveLogPort.mockResolvedValue({ port, error: null });
 
-    await (el as any)._openBootLogs({}, []);
+    await acquireBootLogs(el as any, {} as SerialPort, []);
 
     expect(port.close).toHaveBeenCalledOnce();
     // Parked: openPortForLogs can often reopen a UA-closed handle, so the
@@ -157,7 +184,7 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
       return { port: null };
     });
 
-    await (el as any)._openBootLogs({}, []);
+    await acquireBootLogs(el as any, {} as SerialPort, []);
 
     expect(toast.error).not.toHaveBeenCalled();
   });
@@ -170,7 +197,12 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
 
     await (el as any)._onViewLogs();
 
-    expect(openPortForLogs).toHaveBeenCalledWith(port, expect.anything());
+    expect(openPortForLogs).toHaveBeenCalledWith(
+      port,
+      expect.anything(),
+      ESP_SERIAL_LOGS,
+      115200
+    );
     expect((el as any)._logsOpen).toBe(true);
   });
 
@@ -188,6 +220,37 @@ describe("esphome-web-flash-receiver boot logs hand-off", () => {
 
     expect(port.close).toHaveBeenCalledOnce();
     expect((el as any)._logsOpen).toBe(false);
+  });
+});
+
+describe("esphome-web-flash-receiver reset note in the boot logs", () => {
+  it("leaves the note off the logs of a board that rebooted itself", async () => {
+    const el = await mount();
+    const port = makePort();
+    openLiveLogPort.mockResolvedValue({ port, error: null });
+    (el as any)._engine = async () => ({
+      note: { message: "Release PA00" },
+      logs: { port, knownPorts: [], rebooted: true },
+    });
+    await (el as any)._runInstall(vi.fn());
+    expect((el as any)._logsNotice).toBe("");
+  });
+
+  it("heads the logs with the reset left to the user, and drops it with the dialog", async () => {
+    const el = await mount();
+    const port = makePort();
+    openLiveLogPort.mockResolvedValue({ port, error: null });
+    (el as any)._engine = async () => ({
+      note: { message: "Installation complete" },
+      logs: { port, knownPorts: [], rebooted: false, notice: "Reset the board" },
+    });
+    await (el as any)._runInstall(vi.fn());
+    expect((el as any)._logsNotice).toBe("Reset the board");
+    await el.updateComplete;
+    const dialog = el.shadowRoot!.querySelector("esphome-web-logs-dialog") as any;
+    expect(dialog.notice).toBe("Reset the board");
+    dialog.dispatchEvent(new CustomEvent("after-hide"));
+    expect((el as any)._logsNotice).toBe("");
   });
 });
 

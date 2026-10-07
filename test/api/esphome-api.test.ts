@@ -772,6 +772,22 @@ describe("ESPHomeAPI — typed command wrappers", () => {
     await expect(pending).resolves.toBe("QUFB==");
   });
 
+  it("firmwareAnalyzeMemory sends firmware/analyze_memory and returns the job", async () => {
+    const api = makeApi();
+    const ws = await connect(api);
+    const pending = api.firmwareAnalyzeMemory("kitchen.yaml");
+    const sent = ws.sentAs<{ command: string; message_id: string; args?: unknown }>(0);
+    expect(sent.command).toBe("firmware/analyze_memory");
+    expect(sent.args).toEqual({ configuration: "kitchen.yaml" });
+    const job = {
+      job_id: "j1",
+      job_type: "analyze_memory",
+      configuration: "kitchen.yaml",
+    };
+    ws.receive({ message_id: sent.message_id, result: job });
+    await expect(pending).resolves.toEqual(job);
+  });
+
   it("getEncryptionKey returns an empty string for a non-string key", async () => {
     const api = makeApi();
     const ws = await connect(api);
@@ -1879,15 +1895,20 @@ describe("ESPHomeAPI — getComponentBodies", () => {
     expect(sent.command).toBe("components/get_component_bodies");
     expect(sent.args).toEqual({ component_ids: ["wifi", "api"] });
 
-    const payload = {
-      wifi: { id: "wifi", name: "Wi-Fi" },
-      api: { id: "api", name: "API" },
-    };
+    // Wire shape: a field holding its default is not sent, so a component
+    // with no fields arrives without 'config_entries'.
+    const entries = [{ key: "fast_connect", type: "boolean", label: "Fast Connect" }];
     ws.receive({
       message_id: ws.sentAs<{ message_id: string }>(0).message_id,
-      result: payload,
+      result: {
+        wifi: { id: "wifi", name: "Wi-Fi", config_entries: entries },
+        api: { id: "api", name: "API" },
+      },
     });
-    await expect(pending).resolves.toEqual(payload);
+    await expect(pending).resolves.toEqual({
+      wifi: { id: "wifi", name: "Wi-Fi", config_entries: entries },
+      api: { id: "api", name: "API", config_entries: [] },
+    });
   });
 
   it("forwards platform / board_id as snake_case when provided", async () => {
@@ -1921,6 +1942,136 @@ describe("ESPHomeAPI — getComponentBodies", () => {
     const result = await api.getComponentBodies([]);
     expect(result).toEqual({});
     expect(ws.sent).toHaveLength(0);
+  });
+});
+
+describe("ESPHomeAPI — getAvailableAutomations", () => {
+  beforeEach(() => {
+    installMockWebSocket();
+  });
+  afterEach(() => {
+    uninstallMockWebSocket();
+  });
+
+  it("backfills config_entries on rows and parameters on scripts the wire omitted", async () => {
+    const api = makeApi();
+    const ws = await connect(api);
+
+    const pending = api.getAvailableAutomations("kitchen.yaml");
+    const sent = ws.sentAs<{ command: string; args: Record<string, unknown> }>(0);
+    expect(sent.command).toBe("automations/get_available");
+    expect(sent.args).toEqual({ configuration: "kitchen.yaml" });
+
+    ws.receive({
+      message_id: ws.sentAs<{ message_id: string }>(0).message_id,
+      result: {
+        triggers: [{ id: "on_boot", name: "On Boot", description: "", docs_url: "" }],
+        actions: [],
+        conditions: [],
+        scripts: [
+          { id: "blink" },
+          { id: "fade", parameters: [{ name: "ms", type: "int" }] },
+        ],
+        devices: [{ component_id: "wifi", id: "wifi" }],
+      },
+    });
+    const result = await pending;
+    expect(result.triggers[0].config_entries).toEqual([]);
+    expect(result.scripts).toEqual([
+      { id: "blink", parameters: [] },
+      { id: "fade", parameters: [{ name: "ms", type: "int" }] },
+    ]);
+    expect(result.devices).toEqual([{ component_id: "wifi", id: "wifi" }]);
+  });
+});
+
+describe("ESPHomeAPI — getAutomationBodies", () => {
+  type Sent = { message_id: string; args: { refs: unknown[] } };
+  const a = { type: "actions", id: "a" } as const;
+  const b = { type: "actions", id: "b" } as const;
+
+  beforeEach(() => {
+    installMockWebSocket();
+  });
+  afterEach(() => {
+    uninstallMockWebSocket();
+  });
+
+  it("backfills config_entries on a body the wire sent without one", async () => {
+    const api = makeApi();
+    const ws = await connect(api);
+
+    const refs = [
+      { type: "actions" as const, id: "delay" },
+      { type: "actions" as const, id: "logger.log" },
+    ];
+    const pending = api.getAutomationBodies(refs);
+    const sent = ws.sentAs<{ command: string; args: Record<string, unknown> }>(0);
+    expect(sent.command).toBe("automations/get_bodies");
+    expect(sent.args).toEqual({ refs });
+
+    const entries = [{ key: "format", type: "string", label: "Format" }];
+    ws.receive({
+      message_id: ws.sentAs<{ message_id: string }>(0).message_id,
+      result: {
+        bodies: {
+          "actions/delay": { id: "delay", name: "Delay", domain: "core" },
+          "actions/logger.log": {
+            id: "logger.log",
+            name: "Log",
+            config_entries: entries,
+          },
+        },
+        remaining: [],
+      },
+    });
+    await expect(pending).resolves.toEqual({
+      "actions/delay": { id: "delay", name: "Delay", domain: "core", config_entries: [] },
+      "actions/logger.log": { id: "logger.log", name: "Log", config_entries: entries },
+    });
+  });
+
+  it("short-circuits on an empty ref list without touching the socket", async () => {
+    const api = makeApi();
+    const ws = await connect(api);
+
+    expect(await api.getAutomationBodies([])).toEqual({});
+    expect(ws.sent).toHaveLength(0);
+  });
+
+  it("re-requests ``remaining`` until every page is in", async () => {
+    const api = makeApi();
+    const ws = await connect(api);
+    const pending = api.getAutomationBodies([a, b]);
+    const first = ws.sentAs<Sent>(0);
+    expect(first.args.refs).toEqual([a, b]);
+    ws.receive({
+      message_id: first.message_id,
+      result: { bodies: { "actions/a": { id: "a" } }, remaining: [b] },
+    });
+    await vi.waitFor(() => expect(ws.sent).toHaveLength(2));
+    const second = ws.sentAs<Sent>(1);
+    expect(second.args.refs).toEqual([b]);
+    ws.receive({
+      message_id: second.message_id,
+      result: { bodies: { "actions/b": { id: "b" } }, remaining: [] },
+    });
+    expect(Object.keys(await pending)).toEqual(["actions/a", "actions/b"]);
+  });
+
+  it("stops and warns when a page makes no progress", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const api = makeApi();
+    const ws = await connect(api);
+    const pending = api.getAutomationBodies([a, b]);
+    ws.receive({
+      message_id: ws.sentAs<Sent>(0).message_id,
+      result: { bodies: {}, remaining: [a, b] },
+    });
+    expect(await pending).toEqual({});
+    expect(ws.sent).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("no progress"), [a, b]);
+    warn.mockRestore();
   });
 });
 

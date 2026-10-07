@@ -23,7 +23,6 @@ import type { ConfigEntry } from "../../../api/types/config-entries.js";
 import { ConfigEntryType } from "../../../api/types/config-entries.js";
 import { apiContext } from "../../../context/index.js";
 import { subscribeAutomationCatalogCache } from "../../../util/automation-catalog-cache.js";
-import { makeConfigEntry } from "../../../util/config-entry-defaults.js";
 import { looksLikeTimePeriodScalar } from "../../../util/time-period.js";
 import { YamlRawValue } from "../../../util/yaml-serialize.js";
 import {
@@ -40,15 +39,16 @@ import {
   renderListRemoveButton,
 } from "./lists.js";
 import {
+  appendEditable,
   asList,
   editableEntries,
   formatRegistryId,
   itemId,
   REGISTRY_OPS,
   type RegistryOps,
-  spliceEditable,
-  VALUE_TYPE_TO_CONFIG_TYPE,
 } from "./registry-list-helpers.js";
+import { rowForgotten, rowRemoved } from "./row-memory.js";
+import { makeScalarValueEntry, scalarValueType } from "./scalar-value-entry.js";
 
 @customElement("esphome-registry-list")
 export class ESPHomeRegistryList extends LitElement {
@@ -227,7 +227,7 @@ export class ESPHomeRegistryList extends LitElement {
       `;
     }
     const rawList = asList(raw);
-    const { items } = editableEntries(rawList);
+    const { items, positions } = editableEntries(rawList);
     const disabled = effectiveDisabled(this.entry, this.ctx);
     // Scope the catalog to entries valid for the parent section's
     // domain — sensor's picker should not offer binary_sensor's
@@ -241,7 +241,7 @@ export class ESPHomeRegistryList extends LitElement {
     const catalog = (this._catalog ?? []).filter(
       (entry) =>
         !parentToken ||
-        entry.applies_to.length === 0 ||
+        !entry.applies_to?.length ||
         entry.applies_to.includes(parentToken)
     );
     // Four discriminated states for the picker affordance:
@@ -289,7 +289,15 @@ export class ESPHomeRegistryList extends LitElement {
         ${renderLabel(this.entry, this.ctx, { path: this.path })}
         ${renderListEmptyHint(items, this.ctx)} ${statusHint}
         ${items.map((item, i) =>
-          this._renderRow(item, i, catalog, items, disabled, ops.dedupByTypeId)
+          this._renderRow(
+            item,
+            i,
+            positions[i],
+            catalog,
+            items,
+            disabled,
+            ops.dedupByTypeId
+          )
         )}
         ${renderListAddButton(this.ctx, addDisabled, () => this._addItem())}
         ${renderFieldError(this.path, this.ctx)}
@@ -300,6 +308,7 @@ export class ESPHomeRegistryList extends LitElement {
   private _renderRow(
     item: Record<string, unknown>,
     index: number,
+    position: number,
     catalog: RegistryCatalogEntry[],
     allItems: Record<string, unknown>[],
     disabled: boolean,
@@ -348,10 +357,17 @@ export class ESPHomeRegistryList extends LitElement {
     // (``delayed_on_off: 50ms`` shorthand for the mapping form) the
     // catalog doesn't classify. Suppressed when params is already a
     // mapping so a hypothetical catalog miscategorisation can't
-    // clobber an existing nested config.
-    const scalarConfigType = paramsIsMapping
-      ? null
-      : this._scalarDispatchType(catalogEntry, params);
+    // clobber an existing nested config. A duration known to have no
+    // fields has no nested config, so its mapping is the value's own dict
+    // form (``throttle: {seconds: 5}``); ``config_entries`` is absent until
+    // the row's body hydrates, and only then is that known.
+    const durationMapping =
+      catalogEntry?.value_type === "time_period" &&
+      catalogEntry.config_entries?.length === 0;
+    const scalarConfigType =
+      paramsIsMapping && !durationMapping
+        ? null
+        : this._scalarDispatchType(catalogEntry, params);
     // Render every child unconditionally — the user opted into this
     // filter/effect by picking it from the dropdown, so the outer
     // form's advanced / requiredOnly gates don't apply (many filters
@@ -398,29 +414,22 @@ export class ESPHomeRegistryList extends LitElement {
           ${renderListRemoveButton(this.ctx, disabled, () => this._removeAt(index))}
         </div>
         ${this._renderSubForm(
-          index,
+          position,
           currentId,
           scalarConfigType,
           childEntries,
-          catalogEntry?.templatable ?? false
+          catalogEntry
         )}
       </div>
     `;
   }
 
-  /** Shared mutator: read the on-disk list, run *transform* against
-   *  the editable slice, splice the result back over the original
-   *  list (preserving foreign / multi-key entries verbatim), and
-   *  emit. Centralises the "asList → editableEntries → emit via
-   *  spliceEditable" chain so Add / Remove / Rename can't drift on
-   *  the foreign-entry preservation contract. */
-  private _mutateEditable(
-    transform: (editable: Record<string, unknown>[]) => Record<string, unknown>[]
-  ): void {
+  /** The on-disk list with its editable rows and their places in it.
+   *  Foreign (non-object / multi-key) entries have no row and are kept
+   *  verbatim by every edit. */
+  private _editable() {
     const list = asList(this.ctx.getAt(this.path));
-    const { items, positions } = editableEntries(list);
-    const next = transform(items);
-    this.ctx.emitChange(this.path, spliceEditable(list, positions, next));
+    return { list, ...editableEntries(list) };
   }
 
   /** Decide which scalar input type to dispatch to, if any.
@@ -431,16 +440,8 @@ export class ESPHomeRegistryList extends LitElement {
     catalogEntry: RegistryCatalogEntry | undefined,
     params: unknown
   ): ConfigEntryType | null {
-    const tagged = catalogEntry?.value_type;
-    // hasOwnProperty rather than ``in`` so prototype-chain keys
-    // (``toString`` etc.) coming through a non-typed payload don't
-    // accidentally resolve to a non-ConfigEntryType value.
-    if (
-      tagged &&
-      Object.prototype.hasOwnProperty.call(VALUE_TYPE_TO_CONFIG_TYPE, tagged)
-    ) {
-      return VALUE_TYPE_TO_CONFIG_TYPE[tagged];
-    }
+    const tagged = scalarValueType(catalogEntry);
+    if (tagged !== null) return tagged;
     if (looksLikeTimePeriodScalar(params)) {
       return ConfigEntryType.TIME_PERIOD;
     }
@@ -452,18 +453,18 @@ export class ESPHomeRegistryList extends LitElement {
    *  ``- lambda: |- ...``), the mapping sub-form when it carries
    *  config_entries, or nothing for ids with no params. */
   private _renderSubForm(
-    index: number,
+    position: number,
     currentId: string,
     scalarConfigType: ConfigEntryType | null,
     childEntries: ConfigEntry[],
-    templatable: boolean
+    catalogEntry: RegistryCatalogEntry | undefined
   ) {
     if (scalarConfigType !== null) {
       // templatable adds the literal/lambda toggle on the value (multiply: !lambda).
       return html`<div class="registry-list-sub-form">
-        ${this.ctx.renderEntry(makeConfigEntry({ type: scalarConfigType, templatable }), [
+        ${this.ctx.renderEntry(makeScalarValueEntry(scalarConfigType, catalogEntry), [
           ...this.path,
-          String(index),
+          String(position),
           currentId,
         ])}
       </div>`;
@@ -471,7 +472,12 @@ export class ESPHomeRegistryList extends LitElement {
     if (childEntries.length > 0) {
       return html`<div class="registry-list-sub-form">
         ${childEntries.map((child) =>
-          this.ctx.renderEntry(child, [...this.path, String(index), currentId, child.key])
+          this.ctx.renderEntry(child, [
+            ...this.path,
+            String(position),
+            currentId,
+            child.key,
+          ])
         )}
       </div>`;
     }
@@ -485,29 +491,41 @@ export class ESPHomeRegistryList extends LitElement {
     // so the backend rejects it on save. The picker shows a
     // placeholder until the user chooses; bare-dash placeholders
     // round-trip cleanly through ``serializeListItem``.
-    this._mutateEditable((items) => [...items, {}]);
+    const { list, positions } = this._editable();
+    this.ctx.emitChange(this.path, appendEditable(list, positions, {}));
   }
 
+  /** Remove the row by its place in the whole list, so the entries
+   *  around it, foreign ones included, keep their order. */
   private _removeAt(index: number) {
-    this._mutateEditable((items) => items.filter((_, i) => i !== index));
+    const { list, positions } = this._editable();
+    const position = positions[index];
+    if (position === undefined) return;
+    this.ctx.rowsMoved(this.path, rowRemoved(position));
+    this.ctx.emitChange(
+      this.path,
+      list.filter((_, i) => i !== position)
+    );
   }
 
   private _renameRow(index: number, nextId: string) {
-    this._mutateEditable((items) => {
-      // Reject empty: an empty id would synthesize ``{ "": null }``
-      // and collide with itemId()'s unselected-placeholder sentinel.
-      if (!nextId) return items;
-      const target = items[index];
-      if (!target) return items;
-      const oldId = itemId(target);
-      if (oldId === nextId) return items;
-      // Discard non-null params on type change: each entry type has
-      // its own schema and carrying ``{delta: 0.5}`` over to ``throttle``
-      // would silently produce a scalar where the new type expects a
-      // time string. V1 has no sub-form to surface the mismatch, so
-      // emit ``{nextId: null}`` and let the user reconfigure.
-      return items.map((it, i) => (i === index ? { [nextId]: null } : it));
-    });
+    // Reject empty: an empty id would synthesize ``{ "": null }``
+    // and collide with itemId()'s unselected-placeholder sentinel.
+    if (!nextId) return;
+    const { list, items, positions } = this._editable();
+    const target = items[index];
+    if (!target || itemId(target) === nextId) return;
+    // Discard non-null params on type change: each entry type has
+    // its own schema and carrying ``{delta: 0.5}`` over to ``throttle``
+    // would silently produce a scalar where the new type expects a
+    // time string. V1 has no sub-form to surface the mismatch, so
+    // emit ``{nextId: null}`` and let the user reconfigure.
+    const position = positions[index];
+    this.ctx.rowsMoved(this.path, rowForgotten(position));
+    this.ctx.emitChange(
+      this.path,
+      list.map((it, i) => (i === position ? { [nextId]: null } : it))
+    );
   }
 }
 

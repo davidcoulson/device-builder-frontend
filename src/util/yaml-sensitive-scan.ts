@@ -75,12 +75,23 @@ const ALWAYS_SENSITIVE_KEYS: ReadonlySet<string> = new Set([
 // arbitrary user key like `constructor:` can't resolve a prototype
 // member.
 const PARENT_SCOPED_SENSITIVE_KEYS = new Map<string, Set<string>>([
+  // Not ``eap``: WPA2-Enterprise ``key`` is a path to a PEM file (esphome
+  // runs it through ``cv.file_``), not the key itself.
   ["encryption", new Set(["key"])],
-  // WPA2-Enterprise `key` is the client private key (often a whole PEM
-  // block scalar). Its sibling certificates are public material and stay
-  // visible in UI surfaces; the crash report masks them separately.
-  ["eap", new Set(["key"])],
 ]);
+
+/**
+ * Whether *key* is a credential by the built-in rules: always, or only directly
+ * under *parent* (``key`` under ``encryption``). Case-insensitive on both; no
+ * *parent* means only the always rule can match.
+ */
+export function isBuiltinSensitiveKey(parent: string | undefined, key: string): boolean {
+  const folded = key.toLowerCase();
+  return (
+    ALWAYS_SENSITIVE_KEYS.has(folded) ||
+    PARENT_SCOPED_SENSITIVE_KEYS.get(parent?.toLowerCase() ?? "")?.has(folded) === true
+  );
+}
 
 // Plain-scalar key matcher. Permits hyphens and dots inside the
 // key so user-defined secret names like `wifi-password:` or
@@ -299,22 +310,20 @@ export function findSensitiveValueRanges(
     const sm = shadow.match(KEY_LINE);
     if (!sm) return lineIdx + 1;
     const [, sLeading, sDash = "", sKey, sPreColon, sSep, sRest] = sm;
-    const sKeyFolded = sKey.toLowerCase();
     // Parent scope comes from the live ancestor stack, read at the
     // commented key's column: a `# key:` under a live `encryption:` is
     // the same leak as its uncommented form. Commented keys never push
     // onto the stack themselves.
     const column = markerLen + sLeading.length + sDash.length;
-    let scoped = false;
-    for (let s = stack.length - 1; s >= 0 && !scoped; s--) {
+    let parent: string | undefined;
+    for (let s = stack.length - 1; s >= 0; s--) {
       if (stack[s].indent >= column) continue;
-      scoped = PARENT_SCOPED_SENSITIVE_KEYS.get(stack[s].key)?.has(sKeyFolded) === true;
+      parent = stack[s].key;
       break;
     }
     const sensitive =
       maskAllValues ||
-      scoped ||
-      ALWAYS_SENSITIVE_KEYS.has(sKeyFolded) ||
+      isBuiltinSensitiveKey(parent, sKey) ||
       sensitiveKeyPredicate?.(sKey) === true;
     if (!sensitive) return lineIdx + 1;
 
@@ -397,12 +406,9 @@ export function findSensitiveValueRanges(
     if (maskAllValues) {
       sensitive = true;
     } else {
-      sensitive = ALWAYS_SENSITIVE_KEYS.has(keyFolded);
-      if (!sensitive && stack.length > 0) {
-        const parent = stack[stack.length - 1].key;
-        const allowed = PARENT_SCOPED_SENSITIVE_KEYS.get(parent);
-        if (allowed && allowed.has(keyFolded)) sensitive = true;
-      }
+      // The stack is empty for a top-level key, so the lookup must stay optional.
+      const parent: { key: string } | undefined = stack[stack.length - 1];
+      sensitive = isBuiltinSensitiveKey(parent?.key, key);
       if (!sensitive && sensitiveKeyPredicate) sensitive = sensitiveKeyPredicate(key);
     }
 

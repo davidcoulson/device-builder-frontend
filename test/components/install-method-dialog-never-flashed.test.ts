@@ -11,10 +11,13 @@ import "../_mock-webawesome.js";
 
 vi.mock("@home-assistant/webawesome/dist/components/callout/callout.js", () => ({}));
 
+import { makeConfiguredDevice } from "../_make-configured-device.js";
 import { DeviceState } from "../../src/api/types/devices.js";
 import { ESPHomeInstallMethodDialog } from "../../src/components/install-method-dialog.js";
+import { installsFor } from "../../src/platforms/registry.js";
 import {
   restoreWebSerialEnv,
+  setBluetooth,
   setLocalhostWithWebSerial,
 } from "./_install-method-dialog-env.js";
 
@@ -23,6 +26,8 @@ async function mount(opts: {
   neverFlashed?: boolean;
   state?: DeviceState;
   platform?: string;
+  mcu?: string;
+  loadedPlatforms?: string[];
   mode?: "install" | "logs";
 }): Promise<ESPHomeInstallMethodDialog> {
   const dialog = new ESPHomeInstallMethodDialog();
@@ -31,6 +36,13 @@ async function mount(opts: {
   dialog.neverFlashed = opts.neverFlashed ?? false;
   dialog.deviceState = opts.state ?? DeviceState.UNKNOWN;
   dialog.deviceTargetPlatform = opts.platform ?? "esp32";
+  dialog.platformInstalls = installsFor(
+    makeConfiguredDevice({
+      target_platform: dialog.deviceTargetPlatform,
+      mcu: opts.mcu,
+      loaded_platforms: opts.loadedPlatforms ?? [],
+    })
+  );
   dialog.mode = opts.mode ?? "install";
   document.body.appendChild(dialog);
   await dialog.updateComplete;
@@ -71,10 +83,56 @@ describe("install-method-dialog never-flashed ordering", () => {
     );
   });
 
-  it("promotes server-serial when the platform has no Web Serial row", async () => {
-    const d = await mount({ neverFlashed: true, platform: "rp2" });
+  it("keeps an updater offered, last with the OTA row", async () => {
+    setBluetooth(true);
+    const d = await mount({
+      neverFlashed: true,
+      platform: "nrf52",
+      loadedPlatforms: ["ota.zephyr_mcumgr"],
+    });
+    // The DFU flasher, server-serial, then what needs running firmware.
+    expect(rowIconOrder(d)).toEqual(["chip", "serial-port", "bluetooth", "wifi"]);
+  });
+
+  it("lists an updater with the flashers once the device has run firmware", async () => {
+    setBluetooth(true);
+    const d = await mount({ platform: "nrf52", loadedPlatforms: ["ota.zephyr_mcumgr"] });
+    expect(rowIconOrder(d)).toEqual(["wifi", "chip", "bluetooth", "serial-port"]);
+  });
+
+  it("promotes server-serial when the platform has no browser row", async () => {
+    // The RTL8711AM is the rtl87xx platform with no browser flasher.
+    const d = await mount({ neverFlashed: true, platform: "rtl87xx", mcu: "rtl8711am" });
     const order = rowIconOrder(d);
     expect(order[0]).toBe("serial-port");
+    expect(order[order.length - 1]).toBe("wifi");
+  });
+
+  it("promotes the BK72xx row for a never-flashed bk72xx", async () => {
+    const d = await mount({ neverFlashed: true, platform: "bk72xx", mcu: "bk7238" });
+    const order = rowIconOrder(d);
+    expect(order[0]).toBe("chip");
+    expect(order[order.length - 1]).toBe("wifi");
+  });
+
+  it("promotes the LN882H row for a never-flashed ln882x", async () => {
+    const d = await mount({ neverFlashed: true, platform: "ln882x", mcu: "ln882h" });
+    const order = rowIconOrder(d);
+    expect(order[0]).toBe("chip");
+    expect(order[order.length - 1]).toBe("wifi");
+  });
+
+  it("promotes the RTL8720C row for a never-flashed rtl87xx", async () => {
+    const d = await mount({ neverFlashed: true, platform: "rtl87xx", mcu: "rtl8720c" });
+    const order = rowIconOrder(d);
+    expect(order[0]).toBe("chip");
+    expect(order[order.length - 1]).toBe("wifi");
+  });
+
+  it("promotes the Pico row for a never-flashed rp2", async () => {
+    const d = await mount({ neverFlashed: true, platform: "rp2", mcu: "rp2040" });
+    const order = rowIconOrder(d);
+    expect(order[0]).toBe("chip");
     expect(order[order.length - 1]).toBe("wifi");
   });
 

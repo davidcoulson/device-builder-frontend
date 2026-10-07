@@ -2,10 +2,7 @@ import { consume } from "@lit/context";
 import {
   mdiArrowCollapse,
   mdiArrowExpand,
-  mdiChevronDown,
-  mdiChevronUp,
   mdiClose,
-  mdiDownload,
   mdiOpenInNew,
   mdiTextBoxOutline,
 } from "@mdi/js";
@@ -27,6 +24,13 @@ import {
   firmwareJobsContext,
   localizeContext,
 } from "../context/index.js";
+import {
+  handOffToFlasher,
+  startUsbFlash,
+  startWebSerialInstall,
+} from "../platforms/esp/dashboard.js";
+import type { DetectedChip } from "../platforms/esp/index.js";
+import type { AnyBrowserInstall } from "../platforms/platform-support.js";
 import { fullscreenMobileDialog } from "../styles/dialog-mobile.js";
 import { espHomeStyles } from "../styles/shared.js";
 import { initialDarkMode } from "../util/dark-mode.js";
@@ -36,15 +40,13 @@ import { LogBuffer } from "../util/log-buffer.js";
 import { LONG_TOAST_DURATION_MS, notifyInfo } from "../util/notify.js";
 import { registerMdiIcons } from "../util/register-icons.js";
 import { RunTimerController } from "../util/run-timer-controller.js";
-import type { DetectedChip } from "../util/web-serial.js";
+import { resetForRetry } from "./firmware-install-dialog/browser-flash-steps.js";
 import {
   downloadSelectedBinary,
   flipToLogs,
   showOtaLogs,
   startArtifactDownload,
   startDownload,
-  startWebSerialInstall,
-  waitForRunningJob,
 } from "./firmware-install-dialog/install-flow.js";
 import {
   cardState,
@@ -57,44 +59,31 @@ import {
   renderStatusExtra,
 } from "./firmware-install-dialog/renderers.js";
 import { firmwareInstallDialogStyles } from "./firmware-install-dialog/styles.js";
-import {
-  handOffToFlasher,
-  startUsbFlash,
-} from "./firmware-install-dialog/usb-handoff.js";
+import type {
+  Installer,
+  InstallFailureKind,
+  InstallStep,
+} from "./firmware-install-dialog/types.js";
 import { remoteBuildHintStyles, requestResetPeerBuildEnv } from "./remote-build-hint.js";
 
 import "@home-assistant/webawesome/dist/components/icon/icon.js";
-import "./ansi-log.js";
+import "./install-details-log.js";
 import "./base-dialog.js";
 import "./process-terminal/process-terminal.js";
 
 registerMdiIcons({
   "arrow-expand": mdiArrowExpand,
   "arrow-collapse": mdiArrowCollapse,
-  "chevron-down": mdiChevronDown,
-  "chevron-up": mdiChevronUp,
   close: mdiClose,
-  download: mdiDownload,
   "open-in-new": mdiOpenInNew,
   "text-box-outline": mdiTextBoxOutline,
 });
 
-export type InstallStep =
-  | "connecting"
-  | "queued"
-  | "installing"
-  | "compiling"
-  | "flashing"
-  | "done"
-  | "choose-binary"
-  | "downloading"
-  | "download-ready"
-  | "error";
-
-export type Installer = "web-serial" | "binary-download" | "web-flash" | null;
-
-export type InstallFailureKind =
-  "compile" | "validate" | "chip-mismatch" | "unsupported-browser" | null;
+export type {
+  InstallFailureKind,
+  Installer,
+  InstallStep,
+} from "./firmware-install-dialog/types.js";
 
 @customElement("esphome-firmware-install-dialog")
 export class ESPHomeFirmwareInstallDialog extends LitElement {
@@ -171,6 +160,9 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
   @state() _installer: Installer = null;
 
   _device: ConfiguredDevice | null = null;
+  // Counts the installs this dialog has run. A flow captures it at its start
+  // and stands down when a reopen, for the same device or another, moved on.
+  _installRun = 0;
   _jobId = "";
   _streamId = "";
 
@@ -207,6 +199,20 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
   _compileReject: ((err: Error) => void) | null = null;
   _detected: DetectedChip | null = null;
 
+  // The platform install flow running this install (nRF52, Pico, RTL8720C), and its
+  // parsed image, read through the flow's own FlashImageSlot.
+  // Not @state: it only changes with _installer, which is.
+  _flasher: AnyBrowserInstall | null = null;
+  _flashImage: unknown = null;
+  // The port a browser flash went through; backs "Show logs" on Done.
+  _logsPort: SerialPort | null = null;
+  // Shown at the top of those logs, e.g. a board that waits for a reset.
+  _logsNotice: string | undefined = undefined;
+  // Blocks a second picker while a browser-flash step's picker is open.
+  @state() _flashBusy = false;
+  // Aborts an in-flight browser flash on teardown so the device is released.
+  _flashAbort: AbortController | null = null;
+
   static styles = [
     espHomeStyles,
     firmwareInstallDialogStyles,
@@ -216,6 +222,8 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
     fullscreenMobileDialog("esphome-base-dialog"),
   ];
 
+  // ESP's in-dialog esptool flash; it moves to a platform descriptor
+  // in a later pass, like nRF52, Pico and RTL8720C.
   installWebSerial(device: ConfiguredDevice) {
     this._init(device);
     this._installer = "web-serial";
@@ -224,14 +232,20 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
     void startWebSerialInstall(this);
   }
 
-  // "Flash via USB": compile + download the factory image here (logs/errors
-  // visible), then land on the ready step. The flasher tab is opened only when
-  // the user clicks Open USB flasher — never before a working image exists.
-  installUsbFlash(device: ConfiguredDevice) {
+  // Shared prologue of the compile-first installers.
+  private _begin(device: ConfiguredDevice, installer: Installer) {
     this._init(device);
-    this._installer = "web-flash";
+    this._installer = installer;
     this._step = "queued";
     this._statusMessage = this._localize("firmware.status_queued");
+  }
+
+  // "Flash via USB": compile + download the image here (logs/errors visible),
+  // then land on the ready step. The flasher tab is opened only when the user
+  // clicks Open USB flasher — never before a working image exists. The
+  // device's platform decides the image and the flasher (see handoffFor).
+  installUsbFlash(device: ConfiguredDevice) {
+    this._begin(device, "web-flash");
     void startUsbFlash(this);
   }
 
@@ -243,22 +257,23 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
   // Compile + download with no opinion on how to flash. Always available so
   // users can plug into esptool.py / picotool / a UF2 mass-storage flow.
   installBinaryDownload(device: ConfiguredDevice) {
-    this._init(device);
-    this._installer = "binary-download";
-    this._step = "queued";
-    this._statusMessage = this._localize("firmware.status_queued");
+    this._begin(device, "binary-download");
     void startDownload(this);
+  }
+
+  // A platform's compile-then-flash flow (its PlatformSupport's install, src/platforms/registry.ts).
+  installBrowserFlasher(flasher: AnyBrowserInstall, device: ConfiguredDevice) {
+    this._begin(device, flasher.id);
+    this._flasher = flasher;
+    void flasher.start(this);
   }
 
   // Three-dot "Download" entry; compiles only when nothing is built.
   downloadArtifacts(device: ConfiguredDevice) {
-    this._init(device);
-    this._installer = "binary-download";
+    this._begin(device, "binary-download");
     this._title = this._localize("firmware.download_title", {
       name: device.friendly_name || device.name,
     });
-    this._step = "queued";
-    this._statusMessage = this._localize("firmware.status_queued");
     void startArtifactDownload(this);
   }
 
@@ -279,6 +294,7 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
     // run (which only flips _open) — without this teardown, a still-attached
     // followJob from the prior compile would push lines into the buffer.
     this._detachStream();
+    this._installRun++;
     this._device = device;
     this._open = true;
     this._step = "installing";
@@ -303,6 +319,11 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
     this._usbFirmwareName = "";
     // _detachStream already cleared _jobId / _streamId / _compileReject.
     this._detected = null;
+    this._flasher = null;
+    this._flashImage = null;
+    this._logsPort = null;
+    this._logsNotice = undefined;
+    this._flashBusy = false;
   }
 
   // Tear down active follow_job: client-side (drop local handler) and
@@ -319,6 +340,8 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
       this._usbFlashTeardown();
       this._usbFlashTeardown = null;
     }
+    this._flashAbort?.abort();
+    this._flashAbort = null;
     if (this._streamId) {
       this._api.stopStream(this._streamId).catch(() => {});
       this._streamId = "";
@@ -418,8 +441,28 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
     this._showLogsAfterInstall = !this._showLogsAfterInstall;
   };
 
-  _showLogsAgain = () => {
-    if (this._detected) flipToLogs(this, this._detected.port);
+  // A Show logs pick in flight: a second click would open a second chooser,
+  // which the browser rejects.
+  private _pickingLogsPort = false;
+
+  _showLogsAgain = async () => {
+    if (!this._logsPort) {
+      if (this._pickingLogsPort) return;
+      const device = this._device;
+      this._pickingLogsPort = true;
+      let port: SerialPort | null | undefined;
+      try {
+        port = await this._flasher?.pickLogsPort?.(this._localize);
+      } finally {
+        this._pickingLogsPort = false;
+      }
+      // The picker outlives a dismissed dialog, or one reused for another install.
+      if (!port || this._device !== device || !this._open || this._step !== "done") {
+        return;
+      }
+      this._logsPort = port;
+    }
+    flipToLogs(this, this._logsPort);
   };
 
   // Web-flash success: the flash happened in the external tab, so view the
@@ -428,33 +471,28 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
 
   // Re-run the install after a flash failure: a full reset (_init) + fresh
   // build/flash, so a transient error (serial noise, the external flasher's
-  // chip-init failing, a closed flasher tab) can be retried in place. Routes by
-  // installer since web-flash hands off to the external tab again.
-  _retry = async () => {
+  // chip-init failing, a closed flasher tab) can be retried in place. Nothing
+  // is awaited first: the Web Serial install asks for its port in this click.
+  // A build started elsewhere meanwhile is waited out by the compile (#1202).
+  _retry = () => {
     const device = this._device;
     if (!device) return;
-    // A foreign build may have started while the error screen sat open;
-    // Retry bypasses the page-level seam guards, so re-running now would
-    // supersede it (#1202). Wait it out like the download flow instead.
-    const running = this._activeJobs.get(device.configuration);
-    if (running) {
-      this._step = "queued";
-      this._errorMessage = "";
-      // Drop the failed run's log and clocks so the wait streams only the
-      // foreign build, not the old failure's lines or elapsed time.
-      this._log.reset();
-      this._timer.reset();
-      this._statusMessage = this._localize("firmware.status_waiting_build");
-      const settled = await waitForRunningJob(
-        this,
-        running.job_id,
-        "firmware.install_failed"
-      );
-      if (!settled) return;
-    }
-    if (this._installer === "web-flash") this.installUsbFlash(device);
-    else this.installWebSerial(device);
+    if (this._flasher) this._retryFlasher(this._flasher, device);
+    else if (this._installer === "web-flash") this.installUsbFlash(device);
+    else if (this._installer === "web-serial") this.installWebSerial(device);
   };
+
+  // A failed reset or flash (device dropped mid-transfer, wrong port picked)
+  // keeps the parsed image, so go back to the flasher's first step without
+  // recompiling; a failure before the image existed runs the whole install.
+  private _retryFlasher(flasher: AnyBrowserInstall, device: ConfiguredDevice) {
+    if (flasher.image.get(this) === null) {
+      this.installBrowserFlasher(flasher, device);
+      return;
+    }
+    resetForRetry(this);
+    flasher.showFirstStep(this);
+  }
 
   _cancel = async () => {
     // Stop owns the job from here: a dismissal racing the round-trip must
@@ -486,9 +524,11 @@ export class ESPHomeFirmwareInstallDialog extends LitElement {
   // Escape, or a programmatic close). Same stream teardown as _close —
   // otherwise a header-X-then-reopen leaves the prior followJob attached and
   // lines duplicate into the new session. A compile still attached here was
-  // dismissed mid-build (a programmatic close already detached).
+  // dismissed mid-build (a programmatic close already detached). An after-hide
+  // that lands after a reopen belongs to the run before it, whose _init
+  // already tore down; the run on screen now is left alone.
   _onClose = () => {
-    this._open = false;
+    if (this._open) return;
     this._releaseJobToBackground();
   };
 

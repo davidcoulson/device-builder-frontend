@@ -6,10 +6,12 @@
  */
 
 import type { BoardCatalogEntry } from "../../api/types/boards.js";
-import type { ConfigEntry } from "../../api/types/config-entries.js";
+import type { ComponentCatalogIndexEntry } from "../../api/types/components.js";
+import type { ConfigEntry, RequiredGroup } from "../../api/types/config-entries.js";
 import type { LocalizeFunc } from "../../common/localize.js";
 import type { ComponentProvider } from "../../util/config-entry-yaml-scan.js";
 import type { ValidationError } from "../../util/config-validation.js";
+import type { RowMove } from "./config-entry-renderers/row-memory.js";
 
 export interface RenderCtx {
   localize: LocalizeFunc;
@@ -36,18 +38,17 @@ export interface RenderCtx {
   pinRegistryModes?: Record<string, string[]>;
   requiredOnly: boolean;
   /** Whether the section's advanced fields are shown. Read by
-   *  ``renderChildEntries({ includeAdvanced })`` so an exclusive-group's
+   *  ``renderExclusiveMemberChildren`` so an exclusive-group's
    *  chosen member can reveal all its fields regardless of the toggle. */
   showAdvanced: boolean;
   /** Effective top-level component presence (literal scan, widened via
    *  ``withMergedSourcePresence``) — for the ``depends_on_component``
    *  visibility predicate when filtering directly. */
   presentComponents: ReadonlySet<string>;
-  /** Top-level keys whose backend constraint prose the form replaces with a
-   *  reactive banner/cluster (``required_groups`` keys + inclusive-``group``
-   *  members). ``_fieldDescription`` strips the baked prose only for these, so
-   *  nested-scope members keep theirs. */
-  reactiveConstraintKeys: Set<string>;
+  /** Schema paths of the members whose backend constraint prose the form
+   *  replaces with a reactive banner/cluster (``constraintMemberPaths``).
+   *  ``_fieldDescription`` strips the baked prose only for these. */
+  reactiveConstraintPaths: ReadonlySet<string>;
   /** The form's top-level config entries, for resolving a label of a key that
    *  isn't in a given cluster's members (a cardinality key that's also an
    *  ``exclusive_group`` member is dropped from the cluster), and fed to
@@ -67,6 +68,9 @@ export interface RenderCtx {
    *  values), without overriding a later explicit user collapse. */
   seedNestedOpen: (key: string) => void;
   requestAddComponent: (domain: string) => void;
+  /** The slim catalog index by component id, for judging a reference's
+   *  ``references_class``; null until it loads (asking kicks the load). */
+  catalogById: () => ReadonlyMap<string, ComponentCatalogIndexEntry> | null;
   /**
    * Providers of a cross-domain interface reference. Returns synchronously
    * from the session cache; a miss kicks an async catalog fetch and
@@ -82,10 +86,16 @@ export interface RenderCtx {
   isOptionsExpanded: (path: string[]) => boolean;
   expandOptions: (path: string[]) => void;
   scopeValues: (path: string[]) => Record<string, unknown>;
+  /** *requiredGroups* are the groups of the scope *entries* belong to; their
+   *  demanded members stay visible in required-only mode. */
   filterRenderable: (
     entries: ConfigEntry[],
-    values: Record<string, unknown>
+    values: Record<string, unknown>,
+    requiredGroups?: RequiredGroup[]
   ) => ConfigEntry[];
+  /** The form's ``required_groups``. A top-level optional block one of them
+   *  demands gets an enable switch so the group can be satisfied. */
+  requiredGroups: RequiredGroup[];
   renderEntry: (entry: ConfigEntry, path: string[]) => unknown;
   /**
    * FLOAT_WITH_UNIT-only: stash a unit choice that the user picked
@@ -107,10 +117,10 @@ export interface RenderCtx {
   getEditingMagnitude: (path: string[]) => string | undefined;
   setEditingMagnitude: (path: string[], text: string) => void;
   clearEditingMagnitude: (path: string[]) => void;
-  /** Drop every edit buffer at or under *path*. List-row buffers embed the
-   *  row index, so removing a row must invalidate them — the indices shift
-   *  and an un-blurred buffer would paint (and commit) over the wrong row. */
-  clearEditingMagnitudesUnder: (path: string[]) => void;
+  /** The rows of the list at *path* are about to go where *move* says. What
+   *  the form remembers is keyed by paths that embed the row index, so it
+   *  follows each row to its new index, and a dropped row's is forgotten. */
+  rowsMoved: (path: string[], move: RowMove) => void;
   /**
    * Generic per-key off-config UI-choice store. Born for either/or
    * constraint clusters (radio chooser): ``ClusterChoice`` is the selected

@@ -1,10 +1,12 @@
 /**
  * @vitest-environment happy-dom
  */
+import type { LitElement } from "lit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   call,
+  closeDialog,
   ESPHomeLogsDialog,
   makeLogsDialog,
   paused,
@@ -13,7 +15,12 @@ import {
   toastError,
 } from "./_logs-dialog-env.js";
 
-import { startOtaStream } from "../../src/components/logs-dialog/session.js";
+import { flush } from "../_dom.js";
+import { makeConfiguredDevice } from "../_make-configured-device.js";
+import {
+  type SerialResetHook,
+  startOtaStream,
+} from "../../src/components/logs-dialog/session.js";
 import { hasSerialPort } from "../../src/components/logs-session.js";
 import { crashCalloutStyles } from "../../src/components/process-terminal/crash-callout.js";
 
@@ -54,7 +61,7 @@ describe("logs-dialog states-toggle restart", () => {
     const restart = call(el, "_toggleShowStates");
 
     // The user closes the dialog while the cancel round-trip is outstanding.
-    call(el, "_onDialogHide");
+    closeDialog(el);
     expect((el as any)._open).toBe(false);
 
     stop.resolve(); // the cancel lands; the toggle continuation runs
@@ -152,12 +159,114 @@ describe("logs-dialog header source chip", () => {
     expect(chipText(el)).toBe("/dev/cu.usbserial-110");
   });
 
+  it("shows the BLE label for a Bluetooth passive session, in every phase", async () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => Promise.resolve(), source: "ble" });
+    await el.updateComplete;
+    expect(chipText(el)).toBe("dashboard.logs_source_ble_nus"); // connecting
+    el.setBleStream(async () => {});
+    await el.updateComplete;
+    expect(chipText(el)).toBe("dashboard.logs_source_ble_nus"); // streaming
+  });
+
+  it("heads a network session's log with its notice", async () => {
+    const el = mount();
+    el.open("OTA", { notice: "Reset the board" });
+    await el.updateComplete;
+    expect((el as any)._log.lines[0]).toBe("Reset the board");
+  });
+
+  it("heads a passive session's log with its notice", async () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => Promise.resolve(), notice: "Reset the board" });
+    await el.updateComplete;
+    expect((el as any)._log.lines).toEqual(["Reset the board"]);
+  });
+
+  it.each([
+    ["ble", ["dashboard.logs_ble_nus_connecting"]],
+    ["serial", []],
+  ] as const)(
+    "says in the pane that a %s session is connecting: %s",
+    async (source, lines) => {
+      const el = mount();
+      el.openPassive({ onReconnect: () => Promise.resolve(), source });
+      await el.updateComplete;
+      expect((el as any)._log.lines).toEqual(lines);
+      const term = el.shadowRoot!.querySelector("esphome-process-terminal") as LitElement;
+      await term.updateComplete;
+      expect(term.shadowRoot!.querySelector(".status-banner--info")).toBeNull();
+    }
+  );
+
   it("shows the Web Serial label for a passive (Web Serial) session", async () => {
     const el = mount();
     el.openPassive({ onReconnect: () => Promise.resolve() });
     await el.updateComplete;
     // Identity _localize in tests returns the key verbatim.
     expect(chipText(el)).toBe("dashboard.logs_source_web_serial");
+  });
+});
+
+const alwaysHook: SerialResetHook = {
+  supports: () => true,
+  run: () => Promise.resolve(),
+};
+
+describe("logs-dialog Reset Device gate", () => {
+  async function mountPassive(
+    targetPlatform: string,
+    options: { onResetDevice?: SerialResetHook; source?: "serial" | "ble" } = {}
+  ): Promise<ESPHomeLogsDialog> {
+    const el = makeLogsDialog();
+    el.configuration = "device.yaml";
+    (el as any)._devices = [
+      makeConfiguredDevice({
+        configuration: "device.yaml",
+        target_platform: targetPlatform,
+      }),
+    ];
+    el.openPassive({ onReconnect: () => Promise.resolve(), ...options });
+    await el.updateComplete;
+    return el;
+  }
+
+  const hasResetButton = (el: ESPHomeLogsDialog): boolean =>
+    [...el.shadowRoot!.querySelectorAll(".term-btn__label")].some(
+      (span) => span.textContent?.trim() === "dashboard.logs_reset_device"
+    );
+
+  it("shows Reset Device for an ESP passive session", async () => {
+    expect(hasResetButton(await mountPassive("esp32"))).toBe(true);
+  });
+
+  it("hides Reset Device for a Pico passive session", async () => {
+    expect(hasResetButton(await mountPassive("rp2"))).toBe(false);
+  });
+
+  it("shows Reset Device for a Pico when the session supplies a reset hook", async () => {
+    const el = await mountPassive("rp2", { onResetDevice: alwaysHook });
+    expect(hasResetButton(el)).toBe(true);
+  });
+
+  it("hides Reset Device when the hook does not support the attached port", async () => {
+    const el = await mountPassive("rp2", {
+      onResetDevice: { ...alwaysHook, supports: () => false },
+    });
+    el.setSerialStream({ close: vi.fn(), setSignals: vi.fn() } as any, async () => {});
+    await el.updateComplete;
+    expect(hasResetButton(el)).toBe(false);
+  });
+
+  it("hides Reset Device for an nRF52 Web Serial session", async () => {
+    expect(hasResetButton(await mountPassive("nrf52"))).toBe(false);
+  });
+
+  it("hides Reset Device for a BLE session, whatever the platform", async () => {
+    const el = await mountPassive("esp32", { source: "ble" });
+    el.setBleStream(async () => {});
+    await el.updateComplete;
+    expect(hasResetButton(el)).toBe(false);
   });
 });
 
@@ -190,6 +299,81 @@ describe("logs-dialog States toggle gate (#539)", () => {
   });
 });
 
+describe("logs-dialog BLE auto-reconnect", () => {
+  const mount = (): ESPHomeLogsDialog => makeLogsDialog();
+  const logLines = (el: ESPHomeLogsDialog): string[] => (el as any)._log.lines;
+
+  it("triggerBleReconnect appends status lines and starts a reconnect", () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => new Promise(() => {}), source: "ble" });
+    el.setBleStream(async () => {});
+    el.triggerBleReconnect("dashboard.logs_ble_nus_disconnected");
+    expect(logLines(el)).toContain("dashboard.logs_ble_nus_disconnected");
+    expect(logLines(el)).toContain("dashboard.logs_ble_nus_reconnecting");
+    expect(session(el).kind).toBe("reconnecting");
+  });
+
+  it("triggerBleReconnect is a no-op when the session is not ble", () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => new Promise(() => {}), source: "ble" });
+    // Still in the pending state (no setBleStream yet) — kind is "reconnecting".
+    el.triggerBleReconnect("dashboard.logs_ble_nus_disconnected");
+    expect(logLines(el)).toEqual(["dashboard.logs_ble_nus_connecting"]);
+    expect(session(el).kind).toBe("reconnecting");
+  });
+
+  it("setBleStream does not say Reconnected on the first connect", () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => new Promise(() => {}), source: "ble" });
+    el.setBleStream(async () => {});
+    expect(logLines(el)).not.toContain("dashboard.logs_ble_nus_reconnected");
+    expect(session(el).kind).toBe("ble");
+  });
+
+  it("setBleStream does not say Reconnected after a Start from dead", () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => new Promise(() => {}), source: "ble" });
+    el.setSerialOpenFailed("dashboard.logs_ble_nus_open_failed");
+    call(el, "_onStart");
+    expect(session(el).kind).toBe("reconnecting");
+    el.setBleStream(async () => {});
+    expect(logLines(el)).not.toContain("dashboard.logs_ble_nus_reconnected");
+  });
+
+  it("keeps a Stop pressed before the disconnect across the reconnect", () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => new Promise(() => {}), source: "ble" });
+    el.setBleStream(async () => {});
+    call(el, "_onStop");
+    el.triggerBleReconnect("dashboard.logs_ble_nus_disconnected");
+    expect(session(el)).toMatchObject({ kind: "reconnecting", paused: true });
+    el.setBleStream(async () => {});
+    expect(session(el)).toMatchObject({ kind: "ble", paused: true });
+  });
+
+  it("keeps a Stop pressed during the reconnect and still says Reconnected", () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => new Promise(() => {}), source: "ble" });
+    el.setBleStream(async () => {});
+    el.triggerBleReconnect("dashboard.logs_ble_nus_disconnected");
+    call(el, "_onStop");
+    el.setBleStream(async () => {});
+    expect(logLines(el)).toContain("dashboard.logs_ble_nus_reconnected");
+    expect(session(el)).toMatchObject({ kind: "ble", paused: true });
+  });
+
+  it("setBleStream appends Reconnected when called during a reconnect", () => {
+    const el = mount();
+    el.openPassive({ onReconnect: () => new Promise(() => {}), source: "ble" });
+    el.setBleStream(async () => {});
+    el.triggerBleReconnect("dashboard.logs_ble_nus_disconnected");
+    expect(session(el).kind).toBe("reconnecting");
+    el.setBleStream(async () => {}); // reconnect lands
+    expect(logLines(el)).toContain("dashboard.logs_ble_nus_reconnected");
+    expect(session(el).kind).toBe("ble");
+  });
+});
+
 describe("logs-dialog passive Web Serial session (#526)", () => {
   let el: ESPHomeLogsDialog;
   let logs: ReturnType<typeof vi.fn>;
@@ -203,17 +387,19 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
       { logs, stopStream: vi.fn(() => Promise.resolve()) },
       { mount: false }
     );
-    port = {
-      close: vi.fn(() => Promise.resolve()),
-      setSignals: vi.fn(() => Promise.resolve()),
-    };
+    port = makePort();
     cancel = vi.fn();
+  });
+
+  const makePort = () => ({
+    close: vi.fn(() => Promise.resolve()),
+    setSignals: vi.fn(() => Promise.resolve()),
   });
 
   // Drive a live passive session the way attachSerialLogStream does.
   function startPassive() {
     el.openPassive({ onReconnect: () => Promise.resolve() });
-    el.setSerialStream(port as any, cancel as unknown as () => void);
+    el.setSerialStream(port as any, cancel as unknown as () => Promise<void>);
   }
 
   it("Stop pauses display but keeps the reader + port open (no reopen on resume)", () => {
@@ -247,7 +433,7 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
 
   it("dialog close tears down the serial session (closes port, returns to idle)", () => {
     startPassive();
-    call(el, "_onDialogHide");
+    closeDialog(el);
     // The cancel (from streamSerialToDialog) stops the reader and closes the
     // port; the session drops back to idle so a reopen starts clean.
     expect(cancel).toHaveBeenCalledTimes(1);
@@ -256,7 +442,14 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
 
   it("Reset Device pulses RTS then releases it (auto-reset), without closing the port", async () => {
     startPassive();
+    const logged = vi.spyOn(el as any, "_enqueueLine");
     await (el as any)._onResetDevice();
+    // The marker lands before the pulse, so it precedes the boot output.
+    expect(logged).toHaveBeenLastCalledWith("serial.resetting");
+    const order = logged.mock.invocationCallOrder;
+    expect(order[order.length - 1]).toBeLessThan(
+      port.setSignals.mock.invocationCallOrder[0]
+    );
     expect(port.setSignals).toHaveBeenNthCalledWith(1, {
       dataTerminalReady: false,
       requestToSend: true,
@@ -266,6 +459,96 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
       requestToSend: false,
     });
     expect(port.close).not.toHaveBeenCalled();
+  });
+
+  it("Reset Device runs the session hook on the closed port instead of the pulse", async () => {
+    cancel = vi.fn(async () => {});
+    const fresh = makePort();
+    const logged = vi.spyOn(el as any, "_enqueueLine");
+    const run = vi.fn(async (p: SerialPort, cancelled: () => boolean) => {
+      expect(logged).toHaveBeenCalledWith("serial.resetting");
+      expect(cancel).toHaveBeenCalledOnce(); // reader stopped and port closed first
+      expect(p).toBe(port);
+      expect(session(el).kind).toBe("reconnecting");
+      expect(cancelled()).toBe(false);
+      el.setSerialStream(
+        fresh as any,
+        vi.fn(async () => {})
+      );
+      expect(cancelled()).toBe(true); // the session moved on
+    });
+    el.openPassive({
+      onReconnect: () => Promise.resolve(),
+      onResetDevice: { ...alwaysHook, run },
+    });
+    el.setSerialStream(port as any, cancel as unknown as () => Promise<void>);
+    await (el as any)._onResetDevice();
+    expect(run).toHaveBeenCalledOnce();
+    expect(port.setSignals).not.toHaveBeenCalled();
+    expect(session(el)).toMatchObject({ kind: "serial", port: fresh, paused: false });
+  });
+
+  it.each([
+    ["rejects unhandled", () => Promise.reject(new Error("boom"))],
+    ["ends without a stream", () => Promise.resolve()],
+  ])("drops to dead with a toast when the reset hook %s", async (_case, run) => {
+    el.openPassive({
+      onReconnect: () => Promise.resolve(),
+      onResetDevice: { ...alwaysHook, run },
+    });
+    el.setSerialStream(port as any, cancel as unknown as () => Promise<void>);
+    await (el as any)._onResetDevice();
+    expect(session(el).kind).toBe("dead");
+    expect(toastError).toHaveBeenCalledOnce();
+  });
+
+  // A reset whose hook is parked on a gate, exposing the hook's `cancelled`.
+  async function startGatedReset() {
+    const gate = deferred();
+    let seen!: () => boolean;
+    const run = vi.fn(async (_p: SerialPort, cancelled: () => boolean) => {
+      seen = cancelled;
+      await gate.promise;
+    });
+    el.openPassive({
+      onReconnect: () => Promise.resolve(),
+      onResetDevice: { ...alwaysHook, run },
+    });
+    el.setSerialStream(port as any, cancel as unknown as () => Promise<void>);
+    const reset = (el as any)._onResetDevice() as Promise<void>;
+    await flush(); // past the awaited cancel; the hook is now parked
+    expect(run).toHaveBeenCalledOnce();
+    return { gate, reset, cancelled: () => seen() };
+  }
+
+  it("hands the opener a predicate that trips once this session is gone", () => {
+    const cancelled = el.openPassive({ onReconnect: () => Promise.resolve() });
+    expect(cancelled()).toBe(false);
+    closeDialog(el);
+    expect(cancelled()).toBe(true);
+    el.openPassive({ onReconnect: () => Promise.resolve() }); // a new session
+    expect(cancelled()).toBe(true);
+  });
+
+  it("cancels an in-flight reset as soon as the close is requested", async () => {
+    const { gate, reset, cancelled } = await startGatedReset();
+    expect(cancelled()).toBe(false);
+    closeDialog(el); // X pressed; the hide animation has not even finished
+    expect(cancelled()).toBe(true);
+    gate.resolve();
+    await reset;
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("cancels a reset once the dialog was closed and reopened, sparing the new session", async () => {
+    const { gate, reset, cancelled } = await startGatedReset();
+    closeDialog(el);
+    el.openPassive({ onReconnect: () => Promise.resolve() }); // a new session
+    expect(cancelled()).toBe(true); // not the session it started in
+    gate.resolve();
+    await reset;
+    expect(session(el).kind).toBe("reconnecting"); // the new session, untouched
+    expect(toastError).not.toHaveBeenCalled();
   });
 
   it("Reset Device resumes a paused log so the boot output shows", async () => {
@@ -327,15 +610,15 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
     call(el, "_onStop"); // pause while the attach is still in flight
     expect(paused(el)).toBe(true);
     // The reconnect resolves and re-attaches; it must land paused, not re-show.
-    el.setSerialStream(port as any, cancel as unknown as () => void);
+    el.setSerialStream(port as any, cancel as unknown as () => Promise<void>);
     expect(session(el)).toMatchObject({ kind: "serial", paused: true });
   });
 
   it("tears down a late attach after the dialog closed (no port leak)", () => {
     el.openPassive({ onReconnect: () => Promise.resolve() });
-    call(el, "_onDialogHide"); // closed while an attach was in flight
+    closeDialog(el); // closed while an attach was in flight
     const lateCancel = vi.fn();
-    el.setSerialStream(port as any, lateCancel as unknown as () => void);
+    el.setSerialStream(port as any, lateCancel as unknown as () => Promise<void>);
     expect(lateCancel).toHaveBeenCalledTimes(1); // torn down, not registered
     expect(session(el).kind).toBe("idle");
   });
@@ -344,7 +627,7 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
     el.openPassive({ onReconnect: () => Promise.resolve() });
     el.open("OTA"); // switched to non-passive before the attach landed
     const lateCancel = vi.fn();
-    el.setSerialStream(port as any, lateCancel as unknown as () => void);
+    el.setSerialStream(port as any, lateCancel as unknown as () => Promise<void>);
     expect(lateCancel).toHaveBeenCalledTimes(1);
     expect(session(el).kind).toBe("ota");
   });
@@ -360,7 +643,7 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
 
   it("ignores a late reopen failure after the dialog closed", () => {
     el.openPassive({ onReconnect: () => Promise.resolve() });
-    call(el, "_onDialogHide");
+    closeDialog(el);
     el.setSerialOpenFailed("reopen failed");
     expect(session(el).kind).toBe("idle");
   });
@@ -368,7 +651,7 @@ describe("logs-dialog passive Web Serial session (#526)", () => {
   it("tracks port presence so Reset Device can disable itself", () => {
     el.openPassive({ onReconnect: () => Promise.resolve() });
     expect(hasSerialPort(session(el))).toBe(false); // settle window: no port yet
-    el.setSerialStream(port as any, cancel as unknown as () => void);
+    el.setSerialStream(port as any, cancel as unknown as () => Promise<void>);
     expect(hasSerialPort(session(el))).toBe(true);
     el.setSerialOpenFailed("gone");
     expect(hasSerialPort(session(el))).toBe(false);

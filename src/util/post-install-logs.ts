@@ -1,16 +1,24 @@
 import { OTA_PORT } from "../api/types/streaming.js";
 import type { LocalizeFunc } from "../common/localize.js";
-import { streamSerialToDialog } from "../components/dashboard/actions.js";
+import {
+  dialogLineHooks,
+  streamSerialToDialog,
+} from "../components/dashboard/actions.js";
 import type { ESPHomeLogsDialog } from "../components/logs-dialog.js";
-import { fireRequestEvent } from "./fire-event.js";
+import type { SerialResetHook } from "../components/logs-dialog/session.js";
+import type { BleLogsSupport } from "../platforms/platform-support.js";
+import { serialLogsFor } from "../platforms/registry.js";
+import { platformReset } from "../platforms/serial-logs.js";
+import { releaseLinesAfterReopen } from "../platforms/serial-reopen.js";
+import { formatUsbId } from "./flash-log.js";
 import { resolveLogBaudRate } from "./log-baud-rate.js";
 import { notifyError, notifyInfo } from "./notify.js";
+import type { PostInstallShowLogsDetail } from "./post-install-dispatch.js";
 import { serialConsoleMismatch } from "./serial-console-match.js";
-import {
-  isPortPickerCancel,
-  openLiveSerialPort,
-  SERIAL_REOPEN_TIMEOUT_MS,
-} from "./web-serial.js";
+import { releaseControlLines } from "./serial-control-lines.js";
+import { openFailureMessage, openSerialPort } from "./serial-open-error.js";
+import { openLiveSerialPort, SERIAL_REOPEN_TIMEOUT_MS } from "./serial-reacquire.js";
+import { requestSerialPort } from "./web-serial.js";
 
 /**
  * Route a device whose serial console is provably silent (logger baud_rate 0,
@@ -20,11 +28,37 @@ import {
 export function openNetworkLogsFallback(
   logsDialog: ESPHomeLogsDialog,
   localize: LocalizeFunc,
-  options: { onBackToInstall?: () => void; message?: string } = {}
+  options: { onBackToInstall?: () => void; message?: string; notice?: string } = {}
 ): void {
   const { message, ...openOptions } = options;
   notifyInfo(message ?? localize("dashboard.logs_serial_disabled_fallback"));
   logsDialog.open(OTA_PORT, openOptions);
+}
+
+// Ends the passive session with the cause in the pane (Start reconnects) and
+// toasts it; not once the session moved on, since a newer session is not
+// this failure's.
+function failSerialOpen(
+  logsDialog: ESPHomeLogsDialog,
+  message: string,
+  cancelled: () => boolean = () => false
+): void {
+  if (cancelled()) return;
+  logsDialog.setSerialOpenFailed(message);
+  notifyError(message);
+}
+
+function failPortReopen(
+  logsDialog: ESPHomeLogsDialog,
+  localize: LocalizeFunc,
+  port: SerialPort,
+  cancelled?: () => boolean
+): void {
+  failSerialOpen(
+    logsDialog,
+    localize("dashboard.logs_port_reopen_failed", { port: formatSerialPortLabel(port) }),
+    cancelled
+  );
 }
 
 /**
@@ -37,25 +71,7 @@ export function formatSerialPortLabel(port: SerialPort): string {
   if (usbVendorId === undefined || usbProductId === undefined) {
     return "unknown device";
   }
-  const hex = (n: number) => n.toString(16).padStart(4, "0");
-  return `USB ${hex(usbVendorId)}:${hex(usbProductId)}`;
-}
-
-/**
- * Prompt for a Web Serial port without opening it. Returns ``null`` if the
- * user dismissed the picker; throws on a real requestPort failure. Callers
- * that only need the USB identity can decide before ever opening (no DTR/RTS
- * pulse on a port that won't be used).
- */
-export async function requestSerialPort(): Promise<SerialPort | null> {
-  try {
-    return await navigator.serial.requestPort();
-  } catch (err) {
-    if (isPortPickerCancel(err)) {
-      return null; // User dismissed the port picker.
-    }
-    throw err; // A real requestPort failure — let the caller surface it.
-  }
+  return `USB ${formatUsbId(usbVendorId, usbProductId)}`;
 }
 
 /**
@@ -73,17 +89,23 @@ export async function reconnectWebSerialLogs(
   logsDialog: ESPHomeLogsDialog,
   localize: LocalizeFunc,
   baudRate: number,
-  loggerInterface: string | null
+  loggerInterface: string | null,
+  cancelled: () => boolean = () => false,
+  targetPlatform = ""
 ): Promise<void> {
   let port: SerialPort | null;
   try {
     port = await requestSerialPort();
-  } catch {
-    const message = localize("dashboard.logs_web_serial_open_failed");
-    logsDialog.setSerialOpenFailed(message);
-    notifyError(message);
+  } catch (err) {
+    failSerialOpen(
+      logsDialog,
+      openFailureMessage(err, localize, "dashboard.logs_web_serial_open_failed"),
+      cancelled
+    );
     return;
   }
+  // A pick that lands after the session moved on must not touch the newer one.
+  if (cancelled()) return;
   if (!port) {
     logsDialog.abortSerialReconnect(); // Picker dismissed — back to "Start", quietly.
     return;
@@ -98,58 +120,113 @@ export async function reconnectWebSerialLogs(
     return;
   }
   try {
-    await port.open({ baudRate });
-  } catch {
-    const message = localize("dashboard.logs_web_serial_open_failed");
-    logsDialog.setSerialOpenFailed(message);
-    notifyError(message);
+    await openPortForLogs(port, baudRate, targetPlatform);
+  } catch (err) {
+    failSerialOpen(logsDialog, openFailureMessage(err, localize), cancelled);
     return;
   }
-  await attachSerialLogStream(port, logsDialog, localize, baudRate);
+  await attachSerialLogStream(
+    port,
+    logsDialog,
+    localize,
+    baudRate,
+    cancelled,
+    targetPlatform
+  );
+}
+
+/** Open ``port`` for a logs session and apply the platform's line policy; rejects as ``open`` does. */
+export async function openPortForLogs(
+  port: SerialPort,
+  baudRate: number,
+  targetPlatform: string | null | undefined
+): Promise<void> {
+  await openSerialPort(port, { baudRate });
+  if (serialLogsFor(targetPlatform).releaseLinesAfterOpen) {
+    await releaseControlLines(port);
+  }
 }
 
 /**
- * Detail shape of the cancelable ``request-show-logs-after-install``
- * event dispatched by the install dialogs (command-dialog for OTA /
- * server-serial, firmware-install-dialog for Web Serial).
- *
- * ``port`` is set on the network / server-serial path. ``webSerialPort``
- * is set on the Web Serial path — the dispatching dialog disconnected
- * it for the install reset, and the handler reopens it at log baud.
- * Exactly one of those two is set per event. ``reopenInstall`` is the
- * callback the logs dialog's "Back to install" button invokes to
- * re-show the original install dialog with its preserved state.
+ * The platform's own Reset Device for a Web Serial logs session, or
+ * undefined where the dialog's RTS pulse applies or the platform's reset
+ * can't run in this browser (which hides the button).
  */
-export interface PostInstallShowLogsDetail {
-  configuration: string;
-  name: string;
-  port?: string;
-  webSerialPort?: SerialPort;
-  // Raw device logger baud_rate, only meaningful on the webSerialPort path.
-  // The handler resolves it: null / absent ⇒ 115200 default, 0 ⇒ serial
-  // logging disabled (skip with a notice).
-  loggerBaudRate?: number | null;
-  // Resolved logger output interface (Device.logger_interface), only
-  // meaningful on the webSerialPort path: a port that can't carry it
-  // reroutes to network logs.
-  loggerInterface?: string | null;
-  reopenInstall: () => void;
+export function sessionResetHook(
+  logsDialog: ESPHomeLogsDialog,
+  localize: LocalizeFunc,
+  targetPlatform: string | null | undefined,
+  baudRate: number
+): SerialResetHook | undefined {
+  const support = platformReset(serialLogsFor(targetPlatform));
+  if (!support?.available()) return undefined;
+  return {
+    supports: (port) => support.supports(port),
+    run: async (port, cancelled) => {
+      let live: SerialPort | null = null;
+      let failure: string | undefined;
+      try {
+        // The reboot re-enumerates the port; null when it never came back.
+        if (await support.reboot(port, cancelled)) {
+          live = await openLiveSerialPort(port, { baudRate, cancelled });
+        }
+      } catch (err) {
+        console.warn("Reset Device failed", err);
+        failure = localize(support.failureKey(err) ?? "dashboard.logs_reset_failed");
+      }
+      if (failure) {
+        // A stranded device still gets its toast once the session moved on,
+        // but a newer session must not be flipped dead.
+        if (cancelled()) notifyError(failure);
+        else failSerialOpen(logsDialog, failure);
+      } else if (!live) {
+        failPortReopen(logsDialog, localize, port, cancelled);
+      } else {
+        await attachSerialLogStream(
+          live,
+          logsDialog,
+          localize,
+          baudRate,
+          cancelled,
+          targetPlatform
+        );
+      }
+    },
+  };
 }
 
 /**
- * Dispatch the cancelable ``request-show-logs-after-install`` event
- * from an install dialog. Returns ``true`` iff a host claimed the
- * handoff (called ``preventDefault()``) — the install dialog uses
- * that to decide whether to hide itself or stay open. Centralised
- * here so the two install dialogs (command-dialog for OTA / server-
- * serial, firmware-install-dialog for Web Serial) don't drift on
- * the event name, the ``cancelable`` flag, or the bubble shape.
+ * The Bluetooth twin of ``attachSerialLogStream``: a stream registered, or
+ * the session dead with the reason in the pane. A remote disconnect starts an
+ * automatic reconnect; a failed connect also toasts.
  */
-export function dispatchShowLogsAfterInstall(
-  source: HTMLElement,
-  detail: PostInstallShowLogsDetail
-): boolean {
-  return fireRequestEvent(source, "request-show-logs-after-install", detail);
+export async function attachBleLogs(
+  dialog: ESPHomeLogsDialog,
+  localize: LocalizeFunc,
+  ble: BleLogsSupport,
+  device: BluetoothDevice,
+  cancelled: () => boolean
+): Promise<void> {
+  let cancel: () => Promise<void>;
+  try {
+    cancel = await ble.connect(
+      device,
+      {
+        ...dialogLineHooks(dialog),
+        onDisconnect: () => dialog.triggerBleReconnect(localize(ble.disconnectedKey)),
+      },
+      cancelled
+    );
+  } catch (err) {
+    console.warn("Bluetooth logs connect failed", err);
+    failSerialOpen(dialog, localize(ble.failureKey(err)), cancelled);
+    return;
+  }
+  if (cancelled()) {
+    void cancel();
+    return;
+  }
+  dialog.setBleStream(cancel);
 }
 
 /**
@@ -193,35 +270,37 @@ export function postInstallShowLogsHandler(
  * Begins a passive session (user-initiated logs, post-install hand-off, or
  * the dialog's reconnect-after-failure). A closed port is reopened through the
  * re-enumeration window — resolving the live granted handle, since a native-USB
- * chip's cached handle can be dead after the reset — with DTR/RTS cleared; an
- * already-open port streams as-is.
+ * chip's cached handle can be dead after the reset — with DTR/RTS cleared
+ * unless the board keeps them (``releaseLinesAfterReopen``); an already-open
+ * port streams as-is.
  */
 export async function attachSerialLogStream(
   port: SerialPort,
   logsDialog: ESPHomeLogsDialog,
   localize: LocalizeFunc,
-  baudRate: number
+  baudRate: number,
+  cancelled: () => boolean = () => false,
+  // Required, so a new caller can't forget it: it decides whether a reopen
+  // drops DTR, which would silence an RP2 board's CDC.
+  targetPlatform: string | null | undefined
 ): Promise<void> {
   if (!port.readable) {
     const live = await openLiveSerialPort(port, {
       baudRate,
       timeoutMs: SERIAL_REOPEN_TIMEOUT_MS,
+      cancelled,
     });
     if (!live) {
-      const message = localize("dashboard.logs_port_reopen_failed", {
-        port: formatSerialPortLabel(port),
-      });
-      logsDialog.setSerialOpenFailed(message);
-      notifyError(message);
+      failPortReopen(logsDialog, localize, port, cancelled);
       return;
     }
     port = live;
-    try {
-      await port.setSignals({ dataTerminalReady: false, requestToSend: false });
-    } catch {
-      /* setSignals failures are recoverable; the chip might be in a
-         fine state already. Continue. */
-    }
+    await releaseLinesAfterReopen(port, serialLogsFor(targetPlatform), targetPlatform);
+  }
+  if (cancelled()) {
+    // The session moved on while the port was reopened; nothing will read it.
+    await port.close().catch(() => {});
+    return;
   }
   const cancel = streamSerialToDialog(port, logsDialog);
   logsDialog.setSerialStream(port, cancel);
@@ -240,6 +319,8 @@ export async function handlePostInstallShowLogs(
     webSerialPort,
     loggerBaudRate,
     loggerInterface,
+    targetPlatform,
+    notice,
     reopenInstall,
   } = e.detail;
   logsDialog.configuration = configuration;
@@ -247,7 +328,10 @@ export async function handlePostInstallShowLogs(
   if (webSerialPort) {
     const baudRate = resolveLogBaudRate(loggerBaudRate);
     if (baudRate === null) {
-      openNetworkLogsFallback(logsDialog, localize, { onBackToInstall: reopenInstall });
+      openNetworkLogsFallback(logsDialog, localize, {
+        onBackToInstall: reopenInstall,
+        notice,
+      });
       return;
     }
     const mismatch = serialConsoleMismatch(loggerInterface, webSerialPort, localize);
@@ -255,16 +339,26 @@ export async function handlePostInstallShowLogs(
       openNetworkLogsFallback(logsDialog, localize, {
         onBackToInstall: reopenInstall,
         message: mismatch.message,
+        notice,
       });
       return;
     }
-    logsDialog.openPassive({
+    const cancelled = logsDialog.openPassive({
       onBackToInstall: reopenInstall,
       // "click Start to reconnect" after a reopen failure (#636). Re-acquire a
       // fresh port via the picker rather than reopening the cached esptool
       // handle, which a native-USB chip's post-flash re-enumeration leaves dead.
-      onReconnect: () =>
-        reconnectWebSerialLogs(logsDialog, localize, baudRate, loggerInterface ?? null),
+      onReconnect: (cancelled) =>
+        reconnectWebSerialLogs(
+          logsDialog,
+          localize,
+          baudRate,
+          loggerInterface ?? null,
+          cancelled,
+          targetPlatform ?? ""
+        ),
+      onResetDevice: sessionResetHook(logsDialog, localize, targetPlatform, baudRate),
+      notice,
     });
     /* Settling delay — some USB-UART bridges (notably the CH9102F on
        M5Stamp boards) don't resync their internal CDC state cleanly
@@ -276,7 +370,14 @@ export async function handlePostInstallShowLogs(
     /* The install just left the port closed via ``resetAndDisconnect``;
        the attach reopens the still-granted port (retrying the native-USB
        re-enumeration window) and starts reading. */
-    await attachSerialLogStream(webSerialPort, logsDialog, localize, baudRate);
+    await attachSerialLogStream(
+      webSerialPort,
+      logsDialog,
+      localize,
+      baudRate,
+      cancelled,
+      targetPlatform
+    );
   } else {
     logsDialog.open(port ?? OTA_PORT, { onBackToInstall: reopenInstall });
   }

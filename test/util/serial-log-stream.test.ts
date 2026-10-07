@@ -32,11 +32,10 @@ describe("formatSerialTimestamp", () => {
 });
 
 describe("streamSerialLines", () => {
-  it("stamps and emits complete lines, buffering the trailing fragment", async () => {
+  it("stamps and emits complete lines, holding the trailing fragment while the stream lives", async () => {
     const lines: string[] = [];
     const port = makeOpenPort((c) => {
       c.enqueue(enc("[I][app]: hello\nrest"));
-      c.close();
     });
     streamSerialLines(port as unknown as SerialPort, { onLine: (l) => lines.push(l) });
     await flush();
@@ -99,6 +98,48 @@ describe("streamSerialLines", () => {
     expect(String(onDisconnect.mock.calls[0][0])).toContain("cable yanked");
   });
 
+  it("flushes a partial last line when the device drops the stream", async () => {
+    const lines: string[] = [];
+    const port = makeOpenPort((c) => {
+      c.enqueue(enc("[I][x:1]: done\n[E][x:2]: crashed mid-"));
+      c.close();
+    });
+    streamSerialLines(port as unknown as SerialPort, { onLine: (l) => lines.push(l) });
+    await vi.waitFor(() => expect(lines).toHaveLength(2));
+    expect(lines[1]).toContain("crashed mid-");
+  });
+
+  it("drops the trailing fragment on a caller-initiated cancel (the session moved on)", async () => {
+    const lines: string[] = [];
+    const port = makeOpenPort((c) => {
+      c.enqueue(enc("[I][x:1]: done\n[D][x:2]: half"));
+    });
+    const cancel = streamSerialLines(port as unknown as SerialPort, {
+      onLine: (l) => lines.push(l),
+    });
+    await flush();
+    await cancel();
+    expect(lines).toHaveLength(1);
+  });
+
+  it("still releases the port when the flushed line's sink throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const port = makeOpenPort((c) => {
+      c.enqueue(enc("tail"));
+      c.close();
+    });
+    const onDisconnect = vi.fn();
+    streamSerialLines(port as unknown as SerialPort, {
+      onLine: () => {
+        throw new Error("sink");
+      },
+      onDisconnect,
+    });
+    await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledOnce());
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("does NOT fire onDisconnect on a caller-initiated cancel", async () => {
     let ctrl!: ReadableStreamDefaultController<Uint8Array>;
     const port = makeOpenPort((c) => {
@@ -110,11 +151,21 @@ describe("streamSerialLines", () => {
       onDisconnect,
     });
     await flush();
-    cancel();
+    void cancel();
     await vi.waitFor(() => expect(port.close).toHaveBeenCalledOnce());
 
     expect(onDisconnect).not.toHaveBeenCalled();
     void ctrl;
+  });
+
+  it("cancel resolves once the port is closed, and again on a repeat call", async () => {
+    const port = makeOpenPort(() => {});
+    const cancel = streamSerialLines(port as unknown as SerialPort, { onLine: () => {} });
+    await flush();
+    await cancel();
+    expect(port.close).toHaveBeenCalledOnce();
+    await cancel();
+    expect(port.close).toHaveBeenCalledOnce();
   });
 
   it("cancel closes the port after the read loop releases the lock", async () => {
@@ -124,7 +175,7 @@ describe("streamSerialLines", () => {
     });
     const cancel = streamSerialLines(port as unknown as SerialPort, { onLine: () => {} });
     await flush();
-    cancel();
+    void cancel();
     // cancel → await loopDone (releaseLock) → port.close(): several ticks.
     await vi.waitFor(() => expect(port.close).toHaveBeenCalledOnce());
     void ctrl;

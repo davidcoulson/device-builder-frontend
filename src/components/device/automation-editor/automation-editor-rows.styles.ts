@@ -1,6 +1,6 @@
 import { css } from "lit";
 
-/** Action/condition rows: container, header, picker, controls, nested tree, and delay picker. */
+/** Action/condition rows: container, header, picker, controls, and nested tree. */
 export const automationEditorRowStyles = css`
   .ae-row {
     display: flex;
@@ -185,32 +185,5 @@ export const automationEditorRowStyles = css`
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-bottom: var(--wa-space-2xs);
-  }
-
-  /* Bespoke value + unit picker the Delay action uses instead of
-     its six separate time-component string inputs. Keeps the user
-     in the same "one knob" mental model as the interval form
-     (which is a single time_period string). */
-  .ae-delay {
-    display: flex;
-    flex-direction: column;
-    gap: var(--wa-space-s);
-  }
-  .ae-delay-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--wa-space-m);
-  }
-  .ae-delay-row .field-label {
-    font-size: var(--wa-font-size-s);
-    font-weight: var(--wa-font-weight-semibold);
-    color: var(--wa-color-text-normal);
-    margin-bottom: var(--wa-space-2xs);
-    display: block;
-  }
-  /* Input and wa-select chrome both come from the shared inputStyles,
-     keyed on --wa-form-control-height, so the pair stays equal-height. */
-  .ae-delay-row wa-select {
-    width: 100%;
   }
 `;

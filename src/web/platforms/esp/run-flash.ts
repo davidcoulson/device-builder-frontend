@@ -1,0 +1,161 @@
+/**
+ * The ESPHome Web flash engine, shared by the upload and adoptable install
+ * dialogs. Reuses ``web-serial.ts`` end to end: connect + detect the chip,
+ * ask the plan which binaries to flash, optionally erase, write each part with
+ * aggregate progress, then hard-reset so the new firmware boots.
+ *
+ * Pure orchestration over callbacks — no DOM — so a dialog just renders the
+ * reported state.
+ */
+import type { LocalizeFunc } from "../../../common/localize.js";
+import {
+  type DetectedChip,
+  loadEsptoolOrThrow,
+  releaseSerial,
+} from "../../../platforms/esp/index.js";
+import { getErrorMessage } from "../../../util/error-message.js";
+import { namedConnectFailure } from "../../../util/serial-open-error.js";
+import type { FlashPart } from "./firmware-build.js";
+
+export type FlashStep =
+  "connecting" | "preparing" | "erasing" | "flashing" | "done" | "error";
+
+/**
+ * Localized copy for the engine's own failure states. The engine is DOM- and
+ * i18n-free, so callers pass the strings; when omitted it falls back to the raw
+ * error / an English default.
+ */
+export interface FlashMessages {
+  /**
+   * Shown when the initial connect / chip handshake fails — the actionable
+   * "hold the BOOT button" hint (a bare S2/S3/C3 module needs it).
+   */
+  connectFailed?: string;
+  /** Copy for a failure that can be named: the port held elsewhere, a device
+   *  that never answered, or one lost or gone quiet during a write (see
+   *  ``namedConnectFailure``). */
+  namedFailure?: (err: unknown) => string | undefined;
+  /** Shown when the plan yields no parts to write. */
+  noFirmware?: string;
+  /** Shown when the esptool chunk could not be fetched. */
+  loadFailed?: string;
+}
+
+/** The copy every web.esphome.io ESP flash shows; one place so no caller misses one. */
+export function webFlashMessages(localize: LocalizeFunc): FlashMessages {
+  return {
+    connectFailed: localize("web.install.connect_failed_hint"),
+    loadFailed: localize("firmware.engine_load_failed"),
+    namedFailure: (err) => namedConnectFailure(err, localize),
+    noFirmware: localize("web.install.no_firmware"),
+  };
+}
+
+export interface FlashPlan {
+  /** Whether to erase the whole flash before writing (upload path). */
+  erase?: boolean;
+  /**
+   * Given the detected chip family (esptool ``chip.CHIP_NAME``, e.g.
+   * ``ESP32-C3``), return the parts to flash. Throws to abort with a message.
+   */
+  filesCallback: (chipFamily: string) => Promise<FlashPart[]>;
+  /** Localized failure copy (see :class:`FlashMessages`). */
+  messages?: FlashMessages;
+}
+
+export interface FlashHooks {
+  onStep: (step: FlashStep) => void;
+  onProgress: (percent: number) => void;
+  onLog: (line: string) => void;
+  onError: (message: string) => void;
+}
+
+/**
+ * Run a flash plan against an authorized (closed) port. Returns ``true`` on a
+ * completed flash + reset, ``false`` on cancel or failure (the hooks carry the
+ * detail). Never throws — the caller renders from the reported state.
+ */
+export async function runFlash(
+  port: SerialPort,
+  plan: FlashPlan,
+  hooks: FlashHooks
+): Promise<boolean> {
+  hooks.onStep("connecting");
+  // The port is already authorized (no picker), so the engine can load first.
+  const esptool = await loadEsptoolOrThrow().catch((err: unknown) => {
+    hooks.onStep("error");
+    hooks.onError(plan.messages?.loadFailed ?? getErrorMessage(err));
+    return null;
+  });
+  if (!esptool) return false;
+  let detected: DetectedChip;
+  try {
+    detected = await esptool.connectToPort(port, hooks.onLog);
+  } catch (err) {
+    // The port is already authorized (connectToPort never shows a picker), so a
+    // failure here is another tab or program holding the port, or the chip
+    // handshake — surface the hold-BOOT hint for the latter if the caller gave
+    // us one, and keep the raw error in the console for debugging.
+    console.error(err);
+    hooks.onStep("error");
+    hooks.onError(
+      plan.messages?.namedFailure?.(err) ??
+        plan.messages?.connectFailed ??
+        getErrorMessage(err)
+    );
+    return false;
+  }
+
+  const chipFamily = detected.loader.chip?.CHIP_NAME ?? detected.chipName;
+
+  let parts: FlashPart[];
+  try {
+    hooks.onStep("preparing");
+    parts = await plan.filesCallback(chipFamily);
+    if (parts.length === 0) {
+      throw new Error(plan.messages?.noFirmware ?? "No firmware to flash.");
+    }
+  } catch (err) {
+    hooks.onStep("error");
+    hooks.onError(err instanceof Error ? err.message : String(err));
+    await releaseSerial(esptool, detected);
+    return false;
+  }
+
+  try {
+    if (plan.erase) {
+      hooks.onStep("erasing");
+      await detected.loader.eraseFlash();
+    }
+    hooks.onStep("flashing");
+    const total = parts.reduce((sum, p) => sum + p.data.length, 0);
+    let flashed = 0;
+    for (const part of parts) {
+      await esptool.flashFirmware(detected.loader, part.data, part.address, (p) => {
+        const current = flashed + (p.percent / 100) * part.data.length;
+        hooks.onProgress(total === 0 ? 100 : Math.round((current / total) * 100));
+      });
+      flashed += part.data.length;
+    }
+    hooks.onProgress(100);
+    hooks.onStep("done");
+  } catch (err) {
+    hooks.onStep("error");
+    hooks.onError(plan.messages?.namedFailure?.(err) ?? getErrorMessage(err));
+    await releaseSerial(esptool, detected);
+    return false;
+  }
+
+  // The firmware is already written and committed at this point. The final
+  // reset is best-effort: native-USB chips (C6/H2/P4 → the USB-JTAG EN pulse)
+  // drop and re-enumerate mid-reset, so resetAndDisconnect can throw even
+  // though the write succeeded. Swallow it — a reset hiccup must not turn a
+  // successful flash into a reported failure (which would also skip the
+  // adoptable flow's Wi-Fi hand-off).
+  try {
+    await esptool.resetAndDisconnect(detected.loader, detected.transport, detected.port);
+  } catch {
+    // Device already rebooting into the new firmware; nothing to recover.
+  }
+  return true;
+}

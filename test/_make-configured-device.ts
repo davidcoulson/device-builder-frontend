@@ -25,6 +25,7 @@ const _BASE = {
   area: "",
   board_id: "esp32-c3-devkitm-1",
   target_platform: "esp32",
+  mcu: null,
   address: "kitchen.local",
   ip: "",
   mac_address: "",
@@ -40,6 +41,7 @@ const _BASE = {
   loaded_platforms: [],
   runtime_state: {
     state: DeviceState.UNKNOWN,
+    offline_seconds: null,
     // Live mDNS source so an api-enabled test device shows its out-of-sync /
     // update indicators without leaning on deployed_identity_live below;
     // tests covering the mDNS-dark "hide indicators" behaviour must

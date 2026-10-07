@@ -18,6 +18,11 @@ import type { ConfigEntry, RequiredGroup } from "./config-entries.js";
 // The backend owns YAML parse/write; the frontend exchanges
 // ``AutomationTree`` blobs and applies a ``YamlDiff`` to the editor
 // pane on each save.
+//
+// A catalog field holding its declared default is absent from the
+// wire: read an absent flag as false and an absent list as empty.
+// The API client backfills ``config_entries`` on every body and
+// available-automation row, so that one stays required here.
 
 /** A trigger that can start an automation. */
 export interface AutomationTrigger {
@@ -29,12 +34,12 @@ export interface AutomationTrigger {
    *  Empty list = device-level (``on_boot``, ``on_loop``,
    *  ``on_shutdown``) — always available regardless of which
    *  components are configured. */
-  applies_to: string[];
-  is_device_level: boolean;
+  applies_to?: string[];
+  is_device_level?: boolean;
   /** True when ESPHome accepts a list of handlers (single=False): the
    *  trigger stays offerable past the first handler and appends an indexed
    *  entry. Deterministic replacement for the old 'repeatable' heuristic. */
-  supports_list: boolean;
+  supports_list?: boolean;
   /** Parameter schema (e.g. ``on_click`` has ``min_length`` /
    *  ``max_length`` time-period fields). */
   config_entries: ConfigEntry[];
@@ -51,18 +56,28 @@ export interface AutomationAction {
   /** True for ``if`` / ``while`` / ``repeat`` / ``wait_until`` —
    *  the action embeds nested action lists addressed by the keys in
    *  ``accepts_action_list``. */
-  is_control_flow: boolean;
-  has_else_branch: boolean;
+  is_control_flow?: boolean;
+  has_else_branch?: boolean;
+  /** True when the action takes a condition / all / any boolean gate
+   *  (if, while, wait_until). Absent on the wire when false. */
+  has_condition_gate?: boolean;
   /** Names of fields whose value is itself a list of actions
    *  (``["then"]`` for ``while``, ``["then", "else"]`` for ``if``).
    *  These are stripped from ``config_entries`` server-side so the
    *  frontend renders them as recursive action lists, not as form
    *  fields. */
-  accepts_action_list: string[];
+  accepts_action_list?: string[];
   /** Cross-field cardinality constraints over ``config_entries``
    *  (``homeassistant.service`` requires exactly one of ``service`` /
    *  ``action``). Members are never advanced. */
   required_groups?: RequiredGroup[] | null;
+  /** Set when the whole body is one value (``delay: 2s``) rather than a
+   *  mapping of fields; ``config_entries`` is then empty. The value lives
+   *  under ``SCALAR_BODY_PARAM_KEY``. See ``RegistryCatalogEntry``. */
+  value_type?: RegistryValueType | null;
+  templatable?: boolean;
+  /** See ``ConfigEntry.duration_min_unit``; for a ``time_period`` value. */
+  duration_min_unit?: string | null;
 }
 
 /** A condition usable inside an automation's ``if`` / ``while`` /
@@ -77,10 +92,14 @@ export interface AutomationCondition {
   /** True for ``and`` / ``or`` / ``all`` / ``any`` / ``not`` /
    *  ``xor`` — the condition embeds a recursive list of child
    *  conditions. */
-  accepts_condition_list: boolean;
+  accepts_condition_list?: boolean;
   /** See ``AutomationAction.required_groups`` — e.g. ``sensor.in_range``
    *  requires at least one of ``above`` / ``below``. */
   required_groups?: RequiredGroup[] | null;
+  /** See ``AutomationAction.value_type``. */
+  value_type?: RegistryValueType | null;
+  templatable?: boolean;
+  duration_min_unit?: string | null;
 }
 
 /** Scalar primitives a polymorphic registry entry can take at the
@@ -88,6 +107,10 @@ export interface AutomationCondition {
  *  rather than plain string so a misspelled tag is a compile-time
  *  error against the renderer's dispatch table. */
 export type RegistryValueType = "time_period" | "float" | "integer" | "string" | "lambda";
+
+/** Param key a scalar-bodied action / condition stores its value under:
+ *  the backend's fallback slot for a body with no named field. */
+export const SCALAR_BODY_PARAM_KEY = "id";
 
 /** Common shape for the polymorphic-list registry catalogs
  *  (`light_effects`, `filter`, future additions). One entry per
@@ -100,7 +123,7 @@ export interface RegistryCatalogEntry {
   id: string;
   name: string;
   config_entries: ConfigEntry[];
-  applies_to: string[];
+  applies_to?: string[];
   /** Set when the entry takes a single scalar at the polymorphic
    *  key position (``- throttle: 10s``, ``- delayed_on: 50ms``)
    *  rather than a nested mapping. The renderer mounts the matching
@@ -110,6 +133,8 @@ export interface RegistryCatalogEntry {
   /** The scalar value accepts a lambda (``multiply: !lambda``); the
    *  renderer offers a literal/lambda toggle on the inline input. */
   templatable?: boolean;
+  /** See ``ConfigEntry.duration_min_unit``; for a ``time_period`` value. */
+  duration_min_unit?: string | null;
 }
 
 /** A light effect (``pulse``, ``flicker``, ``addressable_lambda``…).
@@ -133,9 +158,22 @@ export type Filter = RegistryCatalogEntry;
 export type AutomationCatalogBody =
   AutomationTrigger | AutomationAction | AutomationCondition | LightEffect | Filter;
 
+/** ``automations/get_bodies`` reply; re-request ``remaining`` for the
+ *  refs that didn't fit this reply's byte budget. */
+export interface GetAutomationBodiesResponse {
+  bodies: Record<string, AutomationCatalogBody>;
+  remaining: AutomationBodyRef[];
+}
+
 /** Wire ``type`` field on an ``automations/get_bodies`` ref. */
 export type AutomationCatalogBodyType =
   "triggers" | "actions" | "conditions" | "light_effects" | "filters";
+
+/** One ``{type, id}`` ref on an ``automations/get_bodies`` request. */
+export interface AutomationBodyRef {
+  type: AutomationCatalogBodyType;
+  id: string;
+}
 
 /** Tagged-union locator for an automation inside a device YAML.
  *  Mirrors the backend's ``AutomationLocation`` Python dataclass.
@@ -154,9 +192,10 @@ export type AutomationLocation =
  *  nested action lists for control-flow actions, keyed by the
  *  action's ``accepts_action_list`` entries (e.g.
  *  ``{ then: [...], else: [...] }`` for ``if``). ``conditions`` is
- *  populated only for ``if`` (the boolean gate) — other control-flow
- *  actions have their gate elsewhere. ``unknown`` marks an uncatalogued
- *  action (from an ``external_components`` source, or a typo): it's
+ *  populated for actions whose catalog entry has ``has_condition_gate``
+ *  (the boolean gate of ``if`` / ``while`` / ``wait_until``). ``unknown``
+ *  marks an uncatalogued action (from an ``external_components`` source,
+ *  or a typo): it's
  *  shown read-only, and ``raw_body`` is round-tripped verbatim so the
  *  sibling actions stay editable. */
 export interface ActionNode {

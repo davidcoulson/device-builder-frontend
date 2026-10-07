@@ -12,7 +12,10 @@ authoritative coding standard for this repo, set and maintained
 by the human maintainers; everything in this CLAUDE.md sits on
 top of them. When a rule in README.md and a rule here disagree,
 README.md wins; flag the conflict in the PR so this file can be
-brought back into line.
+brought back into line. Read [README.md → "Contributing - keep it
+simple"](README.md#contributing---keep-it-simple) too: it is the
+product policy on flags and settings, and it decides whether a PR
+is accepted at all.
 
 ## What this project is
 
@@ -70,6 +73,46 @@ push back: that case can't happen in this deployment shape.
 Linking this CLAUDE.md inline (e.g. "see CLAUDE.md §
 Frontend-backend deployment is lockstep") is the canonical reply.
 
+Likewise, if a reviewer (human or bot) suggests putting a change
+behind a preference so it "doesn't affect existing users", push
+back and link "Keep the UI simple: no new flags" below. The fix
+is to pick one behaviour, not to add a switch.
+
+## Keep the UI simple: no new flags
+
+Product policy set by the maintainers; the full text is in
+[README.md → "Contributing - keep it
+simple"](README.md#contributing---keep-it-simple). ESPHome is
+already hard enough to onboard into, and the dashboard must not
+add to that, so flags, preferences and toggles that gate
+behaviour need a very strong justification and maintainer
+sign-off. Practical consequences:
+
+- **Don't add a preference, toggle, or setting to gate a new
+  behaviour** unless a maintainer has signed off on it. A PR
+  that adds one on its own will most likely be rejected. Pick
+  the one behaviour that serves the most users and make it the
+  default; there is no "opt in" tier.
+- **"Default off" is not a mitigation.** It hides the feature
+  from the people it was built for and still adds the state,
+  the wiring, and the untested combination.
+- **Expert mode is not the escape hatch.** It holds the few
+  controls that are unsafe or confusing for a beginner (the
+  version history off switch is the model), not personal
+  preferences. Moving a new toggle behind expert mode does not
+  make it acceptable.
+- **Prefer inference over configuration.** Read the answer from
+  context (device state, platform, whether a peer is paired)
+  instead of asking the user to set it.
+- **If a change seems to need a switch, stop and say so** in the
+  PR or discussion before building it. That is a maintainer
+  decision that needs a very strong justification, and the usual
+  answer is to drop the switch and ship one behaviour.
+
+The "Settings dialog conventions" section below describes how a
+setting is wired once a maintainer has agreed one is needed. It
+is not an invitation to add one.
+
 ## Code style
 
 See [README.md → "Code structure
@@ -115,6 +158,10 @@ working memory while editing:
   configuration call.
 
 ## Settings dialog conventions
+
+New settings are rare and need maintainer agreement first (see
+"Keep the UI simple: no new flags" above). What follows is the
+wiring for the ones that have been agreed.
 
 The Settings dialog (`src/components/settings-dialog.ts`) uses a
 sidebar navigation pattern. New sections add an entry to the
@@ -263,7 +310,8 @@ for the full flow. The load-bearing rules:
 Serial tool published to web.esphome.io (`pnpm run dev:web` / `pnpm run
 build:web` → `esphome_web/`, deployed by
 `.github/workflows/deploy-web.yml`). It reuses this repo's design system,
-`src/util/web-serial.ts` (esptool-js flash engine), `process-terminal` /
+the per-platform flash engines in `src/platforms/` (esptool-js in
+`src/platforms/esp/esptool.ts`), `process-terminal` /
 `base-dialog`, and localization, but has **no WebSocket, auth, or API** — its
 shell (`esphome-web-app`) provides only the `localize` + `darkMode` contexts.
 Elements are prefixed `esphome-web-*`; new copy goes in `en.json` under
@@ -274,8 +322,8 @@ firmware from firmware.esphome.io.
 **Flash-receiver mode** (`src/web/flash-receiver/`): web.esphome.io doubles as
 the secure-context flash target the dashboard hands firmware to over
 `postMessage` when it can't flash itself (HA add-on over plain http — Web
-Serial needs https/localhost). `usb-flasher.ts` (the dashboard sender) opens
-`https://web.esphome.io/#nonce=…&origin=…`; the shell detects that hash +
+Serial needs https/localhost). `src/platforms/esp/usb-flasher.ts` (the
+dashboard sender) opens `https://web.esphome.io/#nonce=…&origin=…`; the shell detects that hash +
 `window.opener` and renders `esphome-web-flash-receiver` instead of the
 dashboard. The channel is authenticated by the one-way `nonce` +
 `event.source === opener` (no origin allowlist — the opener is arbitrary
@@ -287,6 +335,10 @@ the backend's `flasher/src/protocol.ts`, and don't set a
 
 - **Don't add backwards-compatibility shims for older backends**
   (see top of file).
+- **Don't add flags, preferences, or toggles to gate behaviour**
+  without a very strong justification and maintainer sign-off,
+  in expert mode or otherwise (see "Keep the UI simple: no new
+  flags"). Such PRs are most likely rejected.
 - **Don't add `Co-Authored-By: Claude` to commits.**
 - **Don't probe for feature support** before using a backend
   command.

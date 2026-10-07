@@ -4,6 +4,7 @@ import { chipNameToVariant } from "../../../util/chip-variant.js";
 import { coerceValueToEntryType } from "../../../util/coerce-entry-value.js";
 import { isValuePresent, nearCanonicalOption } from "../../../util/config-validation.js";
 import { isHexColor } from "../../../util/label-style.js";
+import { findOptionValue } from "../../../util/option-match.js";
 import { renderOptionStack } from "../../../util/option-stack.js";
 import { parseYamlBoolean, YamlRawValue } from "../../../util/yaml-serialize.js";
 import type { OptionsComboboxValueChange } from "../../options-combobox-event.js";
@@ -101,19 +102,18 @@ function resolveEsp32Variant(ctx: RenderCtx): string {
 }
 
 // Keep options whose `variants` is absent/empty or includes the device's
-// variant — plus the currently-stored value, so a board swap can't hide what
-// the YAML still holds. Falls back to all options when the variant is unknown or
-// the filter would empty the select (e.g. psram on a no-PSRAM variant).
+// variant — plus *selected*, the option the stored value spells, so a board
+// swap can't hide what the YAML still holds. Falls back to all options when the
+// variant is unknown or the filter would empty the select (e.g. psram on a
+// no-PSRAM variant).
 function filterOptionsByVariant<T extends { value: string; variants?: string[] }>(
   options: T[],
   variant: string,
-  current = ""
+  selected: string | null
 ): T[] {
   if (!variant) return options;
-  const cur = current.toLowerCase();
   const kept = options.filter(
-    (o) =>
-      !o.variants?.length || o.variants.includes(variant) || o.value.toLowerCase() === cur
+    (o) => !o.variants?.length || o.variants.includes(variant) || o.value === selected
   );
   return kept.length > 0 ? kept : options;
 }
@@ -158,7 +158,7 @@ export function renderSelectField(entry: ConfigEntry, path: string[], ctx: Rende
   // Featured suggestions override options — board author narrowed the choice.
   // Always strict select; suggestions are a closed set.
   if (entry.suggestions && entry.suggestions.length > 0) {
-    return renderSuggestionSelect(entry, path, value, invalid, disabled, ctx);
+    return renderSuggestionSelect(entry, path, raw, invalid, disabled, ctx);
   }
   // The device's ESP32 variant, used to filter per-variant options (and derive
   // the esp32 variant default below); resolved once per render.
@@ -175,7 +175,14 @@ export function renderSelectField(entry: ConfigEntry, path: string[], ctx: Rende
       <div class="field" data-field-key=${fieldKeyAttr(path)}>
         ${renderLabel(entry, ctx, { path })}
         <esphome-options-combobox
-          .options=${filterOptionsByVariant(entry.options, variant, value)}
+          .options=${filterOptionsByVariant(
+            entry.options,
+            variant,
+            findOptionValue(
+              raw,
+              entry.options.map((o) => o.value)
+            )
+          )}
           .value=${value}
           label=${entry.label}
           placeholder=${String(entry.default_value ?? "")}
@@ -197,10 +204,6 @@ export function renderSelectField(entry: ConfigEntry, path: string[], ctx: Rende
       </div>
     `;
   }
-  // Option values are sometimes stored case-differently than the YAML uses
-  // (ESP32C6 vs esp32c6) — case-insensitive compare so the matching option
-  // still flags as selected.
-  const valueLower = value.toLowerCase();
   const defaultStr =
     boardDerivedVariantDefault(entry, ctx, variant) ??
     (entry.default_value != null ? String(entry.default_value) : "");
@@ -210,8 +213,13 @@ export function renderSelectField(entry: ConfigEntry, path: string[], ctx: Rende
   );
   const placeholder = defaultOption?.label ?? defaultStr;
   const { clearable, visibleOptions } = selectOptions(entry);
+  // One winner, by the same matcher the post-render select sync uses.
+  const selectedValue = findOptionValue(
+    raw,
+    visibleOptions.map((o) => o.value)
+  );
   // Filtered after the (entry-keyed) selectOptions memo since it depends on the board.
-  const shownOptions = filterOptionsByVariant(visibleOptions, variant, value);
+  const shownOptions = filterOptionsByVariant(visibleOptions, variant, selectedValue);
   return html`
     <div class="field" data-field-key=${fieldKeyAttr(path)}>
       ${renderLabel(entry, ctx, { path })}
@@ -228,7 +236,7 @@ export function renderSelectField(entry: ConfigEntry, path: string[], ctx: Rende
             : nothing
         }
         ${shownOptions.map((opt) => {
-          const selected = opt.value.toLowerCase() === valueLower;
+          const selected = opt.value === selectedValue;
           const isDefault = defaultStr !== "" && opt.value.toLowerCase() === defaultLower;
           // wa-select activates the first option when nothing is committed,
           // so the default gets a muted note (like the pin menu's notes) —

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isSensitiveKeyUnder,
   maskSensitiveLine,
   maskSensitiveYaml,
 } from "../../src/util/yaml-sensitive-redact.js";
@@ -214,22 +215,20 @@ describe("maskSensitiveYaml", () => {
     expect(masked).not.toContain("abcdef");
   });
 
-  it("masks eap key material including block-scalar PEMs", () => {
+  it("masks the eap password and certificate but not the key path", () => {
     const yaml = [
       "wifi:",
       "  eap:",
       "    username: alice",
       "    password: hunter2",
-      "    key: |",
-      "      -----BEGIN PRIVATE KEY-----",
-      "      pemsecret",
+      "    key: client.key",
       "    certificate: certbody",
     ].join("\n");
     const masked = maskSensitiveYaml(yaml);
     expect(masked).not.toContain("hunter2");
-    expect(masked).not.toContain("pemsecret");
     expect(masked).not.toContain("certbody");
     expect(masked).toContain("    username: alice");
+    expect(masked).toContain("    key: client.key");
   });
 
   it("masks certificate material in reports regardless of parent", () => {
@@ -313,5 +312,25 @@ describe("maskSensitiveYaml", () => {
   it("leaves non-credential key: fields alone", () => {
     const yaml = "remote_receiver:\n  key: 0x12345678";
     expect(maskSensitiveYaml(yaml)).toBe(yaml);
+  });
+});
+
+describe("isSensitiveKeyUnder", () => {
+  it.each([
+    [undefined, "password", true],
+    ["wifi", "Password", true],
+    ["ota", "ota_password", true],
+    ["anything", "my-psk", true],
+    ["encryption", "key", true],
+    ["Encryption", "Key", true],
+    // ``key`` is only a credential under ``encryption``; under ``eap`` it is a path.
+    ["eap", "key", false],
+    ["remote_receiver", "key", false],
+    [undefined, "key", false],
+    ["wifi", "ssid", false],
+    // A key no YAML line pattern would match is still answered.
+    ["auth", "2fa_password", true],
+  ])("under %s, %s -> %s", (parent, key, expected) => {
+    expect(isSensitiveKeyUnder(parent, key)).toBe(expected);
   });
 });

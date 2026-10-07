@@ -9,10 +9,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openLiveSerialPort, reacquirePort } from "../../src/util/serial-reacquire.js";
-import {
-  openLiveSerialPort as openLiveViaBarrel,
-  reacquirePort as reacquireViaBarrel,
-} from "../../src/util/web-serial.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -163,10 +159,31 @@ describe("openLiveSerialPort", () => {
       }),
     });
     stubGetPorts(async () => []);
+    const onFailed = vi.fn();
 
-    expect(await openLiveSerialPort(cached, { baudRate: 115200, timeoutMs: 1 })).toBe(
-      null
+    expect(
+      await openLiveSerialPort(cached, { baudRate: 115200, timeoutMs: 1, onFailed })
+    ).toBe(null);
+    // The caller gets the last error, so it can say why the open failed.
+    expect(onFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "NetworkError" })
     );
+  });
+
+  it("reports the failed open, not a stale candidate's disconnect, when it gives up", async () => {
+    const inUse = new DOMException("Failed to open serial port.", "NetworkError");
+    const fresh = fakePort({
+      readable: null,
+      open: vi.fn(async () => {
+        throw inUse;
+      }),
+    });
+    const cached = fakePort({ connected: false });
+    stubGetPorts(async () => [fresh]);
+    const onFailed = vi.fn();
+
+    await openLiveSerialPort(cached, { baudRate: 115200, timeoutMs: 1, onFailed });
+    expect(onFailed).toHaveBeenCalledWith(inUse);
   });
 
   it("forwards bufferSize to open (the 8k logs buffer must survive the reopen)", async () => {
@@ -220,14 +237,5 @@ describe("openLiveSerialPort", () => {
     });
     expect(got).toBe(null);
     expect(rounds).toBeLessThanOrEqual(3);
-  });
-});
-
-// The web-serial barrel re-exports must stay pointed at these exact
-// functions — long-standing import paths depend on the bridge (#1432).
-describe("web-serial re-export bridge", () => {
-  it("resolves to the same functions as serial-reacquire", () => {
-    expect(reacquireViaBarrel).toBe(reacquirePort);
-    expect(openLiveViaBarrel).toBe(openLiveSerialPort);
   });
 });

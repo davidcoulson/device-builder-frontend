@@ -25,10 +25,11 @@ import {
   isValidApiEncryptionKey,
 } from "../../util/api-encryption-key.js";
 import { coerceValueToEntryType } from "../../util/coerce-entry-value.js";
-import { stripConstraintProse } from "../../util/constraint-groups.js";
+import { schemaPathOf, stripConstraintProse } from "../../util/constraint-groups.js";
 import { resolveEntryLabel } from "../../util/entry-label.js";
 import { renderMarkdown } from "../../util/markdown.js";
 import { isPrimitiveOrNullish } from "../../util/nested-values.js";
+import { findOptionValue } from "../../util/option-match.js";
 import { registerMdiIcons } from "../../util/register-icons.js";
 import { renderInlineError } from "../../util/render-error.js";
 import {
@@ -46,9 +47,14 @@ import {
   hasEscapeWorthyChar,
   unescapeControlForInput,
 } from "../../util/yaml-escape.js";
+import { hasSerializableValue } from "../../util/yaml-serialize.js";
 import { configEntryFormExtraStyles } from "./config-entry-form-extra.styles.js";
 import { configEntryFormStyles } from "./config-entry-form.styles.js";
-import { filterRenderable, renderFilterOptions } from "./config-entry-render-filter.js";
+import {
+  filterRenderable,
+  type RenderFilterOptions,
+  renderFilterOptions,
+} from "./config-entry-render-filter.js";
 import type { RenderCtx } from "./config-entry-renderers-types.js";
 import { constraintClusterStyles } from "./config-entry-renderers/constraint-cluster.styles.js";
 import { literalLambdaToggleStyles } from "./config-entry-renderers/literal-lambda-toggle.js";
@@ -93,7 +99,7 @@ registerMdiIcons({
  * field stays read-only even when the rest of the form is editable.
  */
 export function effectiveDisabled(entry: ConfigEntry, ctx: RenderCtx): boolean {
-  return ctx.disabled || entry.locked;
+  return ctx.disabled || entry.locked === true;
 }
 
 /** Serialize a field path into the ``data-field-key`` attribute. JSON
@@ -233,7 +239,7 @@ export function renderLabel(
       ${entry.locked ? renderLockIcon(entry, ctx, path) : nothing}
       ${includeHelpLink && entry.help_link ? renderHelpLink(entry, ctx) : nothing}
     </label>
-    ${_fieldDescription(entry, ctx)}
+    ${_fieldDescription(entry, path, ctx)}
   `;
 }
 
@@ -255,18 +261,31 @@ function renderLockIcon(entry: ConfigEntry, ctx: RenderCtx, path: string[]) {
 }
 
 /** The field's description, with the backend's baked constraint-prose paragraph
- *  removed only for members the form replaces with a reactive banner/cluster
- *  (top-level constraint keys). Nested-scope members keep their prose until
- *  nested banners land, and a field whose docs merely start with bold "Set …"
- *  isn't stripped by accident. */
-function _fieldDescription(entry: ConfigEntry, ctx: RenderCtx) {
-  const raw = entry.description ?? "";
-  const description = ctx.reactiveConstraintKeys?.has(entry.key)
-    ? stripConstraintProse(raw)
-    : raw;
+ *  removed only for members the form replaces with a reactive banner/cluster,
+ *  so a field whose docs merely start with bold "Set …" isn't stripped by accident. */
+function _fieldDescription(entry: ConfigEntry, path: string[], ctx: RenderCtx) {
+  const description = describedText(entry, path, ctx);
   return description
     ? html`<p class="field-description">${renderMarkdown(description)}</p>`
     : nothing;
+}
+
+/**
+ * *entry*'s description, minus the baked constraint prose when a reactive
+ * banner or cluster speaks for the member at *path*. A nested block's banner
+ * only paints once the block is in use, so until then its members keep the
+ * static prose: the user is never left with neither.
+ */
+export function describedText(
+  entry: ConfigEntry,
+  path: string[],
+  ctx: RenderCtx
+): string {
+  const raw = entry.description ?? "";
+  const spokenFor =
+    ctx.reactiveConstraintPaths.has(schemaPathOf(path)) &&
+    (path.length === 1 || hasSerializableValue(ctx.getAt(path.slice(0, -1))));
+  return spokenFor ? stripConstraintProse(raw) : raw;
 }
 
 export function renderFieldError(path: string[], ctx: RenderCtx) {
@@ -443,7 +462,7 @@ export function renderStringField(
   // by featured components to pin the field to one of a few values
   // (e.g. a PIR pin to one of two FPC-connector GPIOs).
   if (entry.suggestions && entry.suggestions.length > 0) {
-    return renderSuggestionSelect(entry, path, value, invalid, disabled, ctx);
+    return renderSuggestionSelect(entry, path, raw, invalid, disabled, ctx);
   }
   // Password inputs render the dedicated component so they get a
   // reveal/hide toggle. Keeping the show-state inside the component
@@ -504,13 +523,14 @@ export function renderStringField(
 export function renderSuggestionSelect(
   entry: ConfigEntry,
   path: string[],
-  value: string,
+  value: unknown,
   invalid: boolean,
   disabled: boolean,
   ctx: RenderCtx
 ) {
-  const valueLower = value.toLowerCase();
   const placeholder = String(entry.default_value ?? "");
+  const suggestions = (entry.suggestions ?? []).map(String);
+  const selectedValue = findOptionValue(value, suggestions);
   return html`
     <div class="field" data-field-key=${fieldKeyAttr(path)}>
       ${renderLabel(entry, ctx, { path })}
@@ -524,34 +544,37 @@ export function renderSuggestionSelect(
             coerceValueToEntryType(entry, (e.target as HTMLSelectElement).value)
           )}
       >
-        ${(entry.suggestions ?? []).map((s) => {
-          const v = String(s);
-          return html`<wa-option value=${v} ?selected=${v.toLowerCase() === valueLower}
-            >${v}</wa-option
-          >`;
-        })}
+        ${suggestions.map(
+          (v) =>
+            html`<wa-option value=${v} ?selected=${v === selectedValue}>${v}</wa-option>`
+        )}
       </wa-select>
       ${renderFieldError(path, ctx)}
     </div>
   `;
 }
 
-// Shared child rendering for the nested renderer and the exclusive-group
-// dropdown. ``includeAdvanced`` forces advanced children visible — a picked
-// exclusive member's fields must all show, as it has no per-member toggle.
-export function renderChildEntries(
+/** The filter options for the scope *path* sits in, carrying the form's own
+ *  required groups at the top level only. A nested block's groups reach its
+ *  children through ``ownRequiredGroups``, not through here. */
+export function filterOptionsAt(ctx: RenderCtx, path: string[]): RenderFilterOptions {
+  return renderFilterOptions(ctx, {
+    rootValues: ctx.scopeValues([]),
+    requiredGroups: path.length === 1 ? ctx.requiredGroups : undefined,
+  });
+}
+
+// A picked exclusive member's children, advanced ones forced visible: the
+// member has no per-member toggle, so all of its fields must show.
+export function renderExclusiveMemberChildren(
   entry: ConfigEntry,
   path: string[],
-  ctx: RenderCtx,
-  opts: { includeAdvanced?: boolean } = {}
+  ctx: RenderCtx
 ) {
-  const values = ctx.scopeValues(path);
-  const children = opts.includeAdvanced
-    ? filterRenderable(
-        entry.config_entries ?? [],
-        values,
-        renderFilterOptions(ctx, { showAdvanced: true, rootValues: ctx.scopeValues([]) })
-      )
-    : ctx.filterRenderable(entry.config_entries ?? [], values);
+  const children = filterRenderable(
+    entry.config_entries ?? [],
+    ctx.scopeValues(path),
+    renderFilterOptions(ctx, { showAdvanced: true, rootValues: ctx.scopeValues([]) })
+  );
   return children.map((child) => ctx.renderEntry(child, [...path, child.key]));
 }

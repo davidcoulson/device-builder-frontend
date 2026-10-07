@@ -8,6 +8,7 @@
  * retry loops. Everything here is re-exported from ``web-serial.ts`` so
  * existing import paths keep working.
  */
+import { openSerialPort } from "./serial-open-error.js";
 import { sleep } from "./sleep.js";
 
 /**
@@ -18,12 +19,13 @@ import { sleep } from "./sleep.js";
  * port — without this guard the toast in ``app-shell`` would loop
  * every time the wizard runs a serial op.
  *
- * The serial entry points in ``web-serial.ts`` (connectToPort,
- * detectChip, flashFirmware, disconnect, resetAndDisconnect, ...) stamp
- * ``_lastSerialActivityMs`` at the start via ``markSerialActivity``, and
- * the toast click handler in ``app-shell`` does the same to cover the
- * gap between the user's click and the first internal op. The
- * reacquire/reopen loops below do NOT stamp. ``isRecentSerialActivity``
+ * Whatever causes a re-enumeration stamps ``_lastSerialActivityMs`` via
+ * ``markSerialActivity``: the serial entry points in ``web-serial.ts``
+ * (connectToPort, flashFirmware, resetAndDisconnect, ...), the
+ * 1200-baud touch, the PICOBOOT reboot and the nRF DFU close; the toast
+ * click handler in ``app-shell`` does the same to cover the gap between the
+ * user's click and the first internal op. The reacquire/reopen loops below
+ * do NOT stamp, since a real unplug goes through them too. ``isRecentSerialActivity``
  * answers whether we're inside the window defined by
  * ``SERIAL_ACTIVITY_WINDOW_MS``.
  */
@@ -44,6 +46,72 @@ export function isRecentSerialActivity(
   windowMs: number = SERIAL_ACTIVITY_WINDOW_MS
 ): boolean {
   return Date.now() - _lastSerialActivityMs < windowMs;
+}
+
+/**
+ * Whether a ``connect`` event is our own touch, reset or flash
+ * re-enumerating the device. A burst of re-enum events extends the window,
+ * so a slow re-enumeration cannot leak past the static floor.
+ */
+export function isOwnSerialReenumeration(): boolean {
+  if (!isRecentSerialActivity()) return false;
+  markSerialActivity();
+  return true;
+}
+
+/**
+ * The port a ``navigator.serial`` ``connect`` or ``disconnect`` event is
+ * for: current Chromium fires it at the port (``event.target``); an older
+ * draft carried it as ``event.port``. ``null`` for anything else.
+ */
+export function portOfSerialConnectEvent(event: Event): SerialPort | null {
+  const isPort = (candidate: unknown): candidate is SerialPort =>
+    typeof (candidate as SerialPort | null)?.getInfo === "function";
+  const legacy = (event as { port?: unknown }).port;
+  if (isPort(legacy)) return legacy;
+  return isPort(event.target) ? event.target : null;
+}
+
+/**
+ * The device behind a port, as a map key. Chrome hands out a fresh
+ * ``SerialPort`` object when a device re-enumerates, so the object is no
+ * key. Ports without USB ids (Bluetooth RFCOMM, for one) get none, as in
+ * ``matchesDevice``: two of them would otherwise read as the same device.
+ * Web Serial exposes no per-device serial, so two identical boards share a
+ * key; each caller says what that costs it.
+ */
+export function serialDeviceKey(port: SerialPort): string | null {
+  const { usbVendorId, usbProductId } = port.getInfo();
+  if (usbVendorId === undefined || usbProductId === undefined) return null;
+  return `${usbVendorId}:${usbProductId}`;
+}
+
+/**
+ * Per-device "already told the user" memory for the connect toasts. A
+ * bare-flash board can reboot-loop, re-enumerating every cycle; the same
+ * device is announced once per window. Any two ports with the same USB ids
+ * share it, which is often different boards on a common bridge chip (CH340,
+ * CP2102, the ESP32 native USB-JTAG): swapping one for another inside the
+ * window costs that one toast. A port without USB ids is announced every
+ * time. Stale entries are evicted lazily; there is at most one per key.
+ */
+export class SerialConnectAnnouncements {
+  private _lastMs = new Map<string, number>();
+
+  constructor(private readonly _windowMs = 60_000) {}
+
+  /** Whether to announce *port* now; records it when so. */
+  shouldAnnounce(port: SerialPort, now = Date.now()): boolean {
+    const key = serialDeviceKey(port);
+    if (key === null) return true;
+    for (const [k, ts] of this._lastMs) {
+      if (now - ts >= this._windowMs) this._lastMs.delete(k);
+    }
+    const last = this._lastMs.get(key);
+    if (last !== undefined && now - last < this._windowMs) return false;
+    this._lastMs.set(key, now);
+    return true;
+  }
 }
 
 // Budget for finding a usable handle after a disconnect / post-reset close:
@@ -132,7 +200,8 @@ export async function reacquirePort(
  *
  * ``onOpened`` fires only when this call performed the ``open()``; a
  * candidate found already open belongs to whoever opened it, so a caller
- * that closes on teardown can tell the two apart.
+ * that closes on teardown can tell the two apart. ``onFailed`` gets the last
+ * error when it gives up at the deadline, so the caller can say why.
  */
 export async function openLiveSerialPort(
   cachedPort: SerialPort,
@@ -142,6 +211,7 @@ export async function openLiveSerialPort(
     timeoutMs?: number;
     cancelled?: () => boolean;
     onOpened?: (port: SerialPort) => void;
+    onFailed?: (err: unknown) => void;
   }
 ): Promise<SerialPort | null> {
   const {
@@ -150,9 +220,14 @@ export async function openLiveSerialPort(
     timeoutMs = SERIAL_REOPEN_TIMEOUT_MS,
     cancelled = () => false,
     onOpened,
+    onFailed,
   } = options;
   const deadline = Date.now() + timeoutMs;
   let lastErr: unknown = null;
+  // The last error from an actual open() attempt: the one that says why the
+  // port won't open (another tab or program holds it), where lastErr can be
+  // a stale candidate's "disconnected".
+  let openErr: unknown = null;
   while (!cancelled()) {
     const { fresh } = await grantedHandlesFor(cachedPort);
     const candidates = [...fresh, cachedPort];
@@ -175,11 +250,12 @@ export async function openLiveSerialPort(
         return p; // already open (a reset race left it usable)
       }
       try {
-        await p.open(bufferSize ? { baudRate, bufferSize } : { baudRate });
+        await openSerialPort(p, bufferSize ? { baudRate, bufferSize } : { baudRate });
         onOpened?.(p);
         return p;
       } catch (err) {
         lastErr = err;
+        openErr = err;
         const name = err instanceof DOMException ? err.name : "";
         const message = err instanceof Error ? err.message : "";
         // Already open (a reset race / another candidate) — usable only
@@ -203,6 +279,7 @@ export async function openLiveSerialPort(
     }
     if (Date.now() >= deadline) {
       console.error("[Web Serial] Failed to reopen port:", lastErr);
+      onFailed?.(openErr ?? lastErr);
       return null;
     }
     // Re-check before the inter-round sleep so a teardown that landed

@@ -8,6 +8,7 @@
  * echo a spurious change, dirty the form, and trigger a lossy
  * re-serialize of the whole section.
  */
+import { undo } from "@codemirror/commands";
 import { describe, expect, it, vi } from "vitest";
 
 import { mount } from "../../_dom.js";
@@ -89,5 +90,42 @@ describe("lambda-editor lambda-change emission", () => {
     await el.updateComplete;
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(view.state.doc.toString()).toBe("return 99;");
+  });
+
+  it("keeps its body and still reports edits after the element is moved", async () => {
+    // A keyed list moves a row's elements on a reorder.
+    const el = await mount(new ESPHomeLambdaEditor(), { value: "return 1;" });
+    const onChange = vi.fn();
+    el.addEventListener("lambda-change", onChange);
+    const elsewhere = document.createElement("div");
+    document.body.appendChild(elsewhere);
+
+    elsewhere.appendChild(el);
+    await el.updateComplete;
+
+    const view = el["_view"]!;
+    expect(view.state.doc.toString()).toBe("return 1;");
+    expect(onChange).not.toHaveBeenCalled();
+    view.dispatch({ changes: { from: 0, to: 0, insert: "// " } });
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps its undo history and selection after the element is moved", async () => {
+    const el = await mount(new ESPHomeLambdaEditor(), { value: "return 1;" });
+    const view = el["_view"]!;
+    view.dispatch({
+      changes: { from: 9, insert: " // abc" },
+      selection: { anchor: 7, head: 8 },
+    });
+    const elsewhere = document.createElement("div");
+    document.body.appendChild(elsewhere);
+
+    elsewhere.appendChild(el);
+    await el.updateComplete;
+
+    expect(el["_view"]).toBe(view);
+    expect(view.state.selection.main.toJSON()).toEqual({ anchor: 7, head: 8 });
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("return 1;");
   });
 });

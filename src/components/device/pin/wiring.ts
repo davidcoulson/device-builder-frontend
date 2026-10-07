@@ -40,6 +40,7 @@ import {
   type LockedReasonCarrier,
   type RenderCtx,
 } from "../config-entry-renderers-shared.js";
+import { PIN_ADVANCED_SUFFIX } from "./advanced-key.js";
 import { renderCustomEditor, renderLongFormChild, wiringDiagram } from "./mode-editor.js";
 
 registerMdiIcons({ tune: mdiTune });
@@ -166,7 +167,7 @@ export function renderPinWiring(opts: PinWiringOptions): TemplateResult | typeof
       : ctx.localize("device.pin_wiring_summary", { value: summaryValue });
   }
 
-  const advancedKey = `${path.join(".")}:pin-advanced`;
+  const advancedKey = `${path.join(".")}${PIN_ADVANCED_SUFFIX}`;
   // Seed open only when the summary line can't carry the state: raw
   // disclosure fields with values, or a flag combination no preset
   // names. A preset-matched pin stays collapsed — the summary announces

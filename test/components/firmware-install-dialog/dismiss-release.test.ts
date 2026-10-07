@@ -9,13 +9,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../_mock-webawesome.js";
-vi.mock("../../../src/util/web-serial.js", () => ({
+vi.mock("../../../src/util/web-serial.js", () => ({}));
+vi.mock("../../../src/platforms/esp/esptool.js", () => ({
   connectToPort: vi.fn(),
-  detectChip: vi.fn(),
   disconnect: vi.fn(),
   flashFirmware: vi.fn(),
   resetAndDisconnect: vi.fn(),
-  SERIAL_ACTIVITY_WINDOW_MS: 6000,
 }));
 const { notifyInfo, notifyError } = vi.hoisted(() => ({
   notifyInfo: vi.fn(),
@@ -84,6 +83,35 @@ describe("install-dialog dismissal", () => {
     dialog._step = "download-ready";
     dialog._onClose();
     expect(notifyInfo).not.toHaveBeenCalled();
+  });
+
+  it("a reopen for the same device is a new install run", () => {
+    const { dialog } = makeDialog();
+    const device = { configuration: "d.yaml", name: "d", friendly_name: "D" };
+    dialog["_init"](device as never);
+    const run = dialog._installRun;
+    dialog._onClose();
+    dialog["_init"](device as never);
+    expect(dialog._installRun).toBe(run + 1);
+    expect(dialog._open).toBe(true);
+  });
+
+  it("an after-hide that lands after a reopen leaves the new run alone", () => {
+    const { dialog, api, reject } = makeDialog();
+    const device = { configuration: "d.yaml", name: "d", friendly_name: "D" };
+    dialog._onRequestClose();
+    // The reopen tears the old run down itself, before its after-hide fires.
+    dialog["_init"](device as never);
+    expect(reject).toHaveBeenCalledTimes(1);
+    const rejectNext = vi.fn();
+    Object.assign(dialog, { _jobId: "j2", _streamId: "s2", _compileReject: rejectNext });
+
+    dialog._onClose();
+
+    expect(dialog._open).toBe(true);
+    expect(dialog._jobId).toBe("j2");
+    expect(rejectNext).not.toHaveBeenCalled();
+    expect(api.stopStream).not.toHaveBeenCalledWith("s2");
   });
 
   it("_close never cancels", () => {

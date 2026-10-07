@@ -1,0 +1,196 @@
+/**
+ * The steps every compile-first platform install flow (nRF52 DFU, Pico UF2,
+ * RTL8720C ROM) shares: fetching the build artifact into memory, going back
+ * to its bootloader step on Retry, the port picker with its failure
+ * reported, and the 1200-baud touch into a board's bootloader.
+ */
+import type { ConfiguredDevice } from "../../api/types/devices.js";
+import type { FirmwareBinary } from "../../api/types/firmware-jobs.js";
+import { getErrorMessage } from "../../util/error-message.js";
+import { notifyError } from "../../util/notify.js";
+import { resetToBootloader } from "../../util/serial-bootloader-touch.js";
+import { connectFailureDetail } from "../../util/serial-open-error.js";
+import { PortNotAcceptedError, requestSerialPort } from "../../util/web-serial.js";
+import type { ESPHomeFirmwareInstallDialog } from "../firmware-install-dialog.js";
+import { compileOrFail, failNoBinaries, fetchBinaries } from "./install-flow.js";
+
+/** The build's UF2, the artifact the Pico and LibreTiny flows take. */
+export const pickUf2 = (binaries: FirmwareBinary[]): FirmwareBinary | undefined =>
+  binaries.find((b) => b.type === "uf2");
+
+export interface BuildArtifact {
+  binary: FirmwareBinary;
+  bytes: Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * Compile, list the artefacts, pick one with ``pick`` and download it.
+ * Null means the failure is already on the dialog, or the dialog moved to
+ * another device meanwhile (it is reused; a close-and-reopen during an await
+ * must not receive this install's image).
+ */
+export async function downloadBuildArtifact(
+  host: ESPHomeFirmwareInstallDialog,
+  device: ConfiguredDevice,
+  pick: (binaries: FirmwareBinary[]) => FirmwareBinary | undefined,
+  noArtifactKey: string
+): Promise<BuildArtifact | null> {
+  const stale = () => host._device !== device;
+  if (!(await compileOrFail(host, device.configuration)) || stale()) return null;
+
+  // Compile is done and the byte fetch can't be cancelled: the downloading
+  // step's footer offers Close, not a Stop aimed at a finished job.
+  host._statusMessage = host._localize("firmware.status_downloading");
+  host._step = "downloading";
+  const binaries = await fetchBinaries(host, device.configuration);
+  if (!binaries || stale()) return null;
+  if (binaries.length === 0) {
+    // The hand-off to web.esphome.io names what that flasher takes.
+    failNoBinaries(host, {
+      isWebFlasher: host._installer === "web-flash",
+      isEmpty: true,
+    });
+    return null;
+  }
+  const binary = pick(binaries);
+  if (!binary) {
+    host._fail(host._localize(noArtifactKey));
+    return null;
+  }
+
+  let bytes: Uint8Array<ArrayBuffer>;
+  try {
+    bytes = new Uint8Array(
+      await host._api.firmwareDownloadBytes(device.configuration, binary.file)
+    );
+  } catch (err) {
+    if (!stale())
+      host._fail(host._localize("firmware.download_failed"), getErrorMessage(err));
+    return null;
+  }
+  return stale() ? null : { binary, bytes };
+}
+
+/** Back to a bootloader step after a failed reset or flash, image kept. */
+export function resetForRetry(host: ESPHomeFirmwareInstallDialog): void {
+  host._errorMessage = "";
+  host._flashPercent = 0;
+  host._flashBusy = false;
+}
+
+export interface TouchStep {
+  /** The install's parsed image; identifies the install the step belongs to. */
+  image: () => unknown;
+  /** Status while the picker and the touch run. */
+  resettingKey: string;
+  /** Show the wait step once the touch is done. */
+  showNext: () => void;
+  /** The failure detail; a flasher may add a hint for a failed touch. */
+  failureDetail?: (err: unknown) => string;
+  /** The port the touch went through (closed), for a flow that wants it back later. */
+  onTouched?: (port: SerialPort) => void;
+  /**
+   * Narrow the picker to the board's own port, and turn a wrong pick (say a
+   * debug probe on the same vendor id) away with ``refusedKey`` instead of
+   * touching it.
+   */
+  pick?: {
+    filters: SerialPortFilter[];
+    accept: (port: SerialPort) => boolean;
+    refusedKey: string;
+  };
+}
+
+/**
+ * The 1200-baud touch into a board's bootloader from a footer click (user
+ * gesture): pick the port, touch it, then show the wait step. Every await is
+ * followed by a check that the reused dialog still shows this install.
+ */
+export async function touchIntoBootloaderStep(
+  host: ESPHomeFirmwareInstallDialog,
+  step: TouchStep
+): Promise<void> {
+  const image = step.image();
+  if (!image || host._flashBusy) return;
+  const device = host._device;
+  const stillCurrent = () => host._device === device && step.image() === image;
+  const status = host._statusMessage;
+  host._flashBusy = true;
+  host._statusMessage = host._localize(step.resettingKey);
+  try {
+    let port: SerialPort | null;
+    try {
+      port = step.pick
+        ? await requestSerialPort({ filters: step.pick.filters }, step.pick.accept)
+        : await requestSerialPort();
+    } catch (err) {
+      if (!step.pick || !(err instanceof PortNotAcceptedError)) throw err;
+      // Like the failure path below: a picker that outlived its install
+      // must not toast over the next one.
+      if (stillCurrent()) {
+        host._statusMessage = status;
+        notifyError(host._localize(step.pick.refusedKey));
+      }
+      return;
+    }
+    if (!port) {
+      if (stillCurrent()) host._statusMessage = status;
+      return;
+    }
+    // The picker outlives a dismissed dialog; don't reset a port picked for
+    // an install that no longer exists.
+    if (!stillCurrent()) return;
+    await resetToBootloader(port, installLog(host, stillCurrent));
+    // Not for a dialog reused while the touch ran: the port is another board's.
+    if (stillCurrent()) step.onTouched?.(port);
+  } catch (err) {
+    if (stillCurrent()) {
+      host._fail(
+        host._localize("firmware.browser_flash_connect_failed"),
+        connectFailureDetail(err, host._localize, step.failureDetail)
+      );
+    }
+    return;
+  } finally {
+    if (stillCurrent()) host._flashBusy = false;
+  }
+  if (stillCurrent()) step.showNext();
+}
+
+/**
+ * The Web Serial picker from a footer click. Null when dismissed, when the
+ * dialog moved on, or when the failure is already on the dialog.
+ */
+export async function pickSerialPortOrFail(
+  host: ESPHomeFirmwareInstallDialog,
+  stillCurrent: () => boolean
+): Promise<SerialPort | null> {
+  host._flashBusy = true;
+  try {
+    const port = await requestSerialPort();
+    return stillCurrent() ? port : null;
+  } catch (err) {
+    if (stillCurrent()) {
+      host._fail(
+        host._localize("firmware.browser_flash_connect_failed"),
+        connectFailureDetail(err, host._localize)
+      );
+    }
+    return null;
+  } finally {
+    if (stillCurrent()) host._flashBusy = false;
+  }
+}
+
+/**
+ * An engine's step lines land in the details log, as esptool's do; a line
+ * that arrives after the dialog moved on to another install is dropped.
+ */
+export function installLog(
+  host: ESPHomeFirmwareInstallDialog,
+  stillCurrent: () => boolean
+): (line: string) => void {
+  return (line) => {
+    if (stillCurrent()) host._log.enqueue(line);
+  };
+}

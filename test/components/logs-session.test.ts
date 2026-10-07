@@ -10,13 +10,18 @@ import {
 } from "../../src/components/logs-session.js";
 
 const fakePort = {} as SerialPort;
-const noop = () => {};
+const noop = () => Promise.resolve();
 const serial = (paused = false): LogsSession => ({
   kind: "serial",
   port: fakePort,
   cancel: noop,
   paused,
   outputSeen: false,
+});
+const ble = (paused = false): LogsSession => ({
+  kind: "ble",
+  cancel: noop,
+  paused,
 });
 
 describe("logs-session selectors", () => {
@@ -25,11 +30,13 @@ describe("logs-session selectors", () => {
     expect(isStreaming({ kind: "ota", port: "OTA", streamId: null })).toBe(false);
   });
 
-  it("isStreaming: serial/reconnecting stream unless paused", () => {
+  it("isStreaming: serial/reconnecting/ble stream unless paused", () => {
     expect(isStreaming(serial())).toBe(true);
     expect(isStreaming(serial(true))).toBe(false);
     expect(isStreaming({ kind: "reconnecting", paused: false })).toBe(true);
     expect(isStreaming({ kind: "reconnecting", paused: true })).toBe(false);
+    expect(isStreaming(ble())).toBe(true);
+    expect(isStreaming(ble(true))).toBe(false);
   });
 
   it("isStreaming: idle and dead never stream", () => {
@@ -37,10 +44,11 @@ describe("logs-session selectors", () => {
     expect(isStreaming({ kind: "dead" })).toBe(false);
   });
 
-  it("isPassive: every Web Serial phase, never OTA/idle", () => {
+  it("isPassive: every Web Serial / BLE phase, never OTA/idle", () => {
     const passive: LogsSession[] = [
       serial(),
       { kind: "reconnecting", paused: false },
+      ble(),
       { kind: "dead" },
     ];
     for (const s of passive) expect(isPassive(s)).toBe(true);
@@ -55,6 +63,7 @@ describe("logs-session selectors", () => {
       { kind: "dead" },
       { kind: "ota", port: "OTA", streamId: "s1" },
       { kind: "idle" },
+      ble(),
     ] as LogsSession[]) {
       expect(hasSerialPort(s)).toBe(false);
     }
@@ -79,6 +88,7 @@ describe("logs-session selectors", () => {
       { kind: "reconnecting", paused: false },
       { kind: "dead" },
       { kind: "idle" },
+      ble(),
     ] as LogsSession[]) {
       expect(isOtaNetwork(s)).toBe(false);
     }

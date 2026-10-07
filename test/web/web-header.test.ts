@@ -3,14 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/util/register-icons.js", () => ({ registerMdiIcons: vi.fn() }));
 vi.mock("@home-assistant/webawesome/dist/components/icon/icon.js", () => ({}));
-vi.mock("@home-assistant/webawesome/dist/components/tooltip/tooltip.js", () => ({}));
 
-import { expectTooltipsAnchored } from "../_tooltip-anchors.js";
 import { ESPHomeWebHeader } from "../../src/web/header/esphome-web-header.js";
+import { WEB_PLATFORMS } from "../../src/web/platforms/registry.js";
+import type { WebMode } from "../../src/web/web-mode.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-// The switch button only renders when Web Serial is available; happy-dom has no
+// The mode picker only renders when Web Serial is available; happy-dom has no
 // navigator.serial, so define one for the duration of these tests.
 let hadSerial = false;
 beforeEach(() => {
@@ -27,7 +27,7 @@ afterEach(() => {
   }
 });
 
-async function mount(mode: "esp" | "pico", minimal = false): Promise<ESPHomeWebHeader> {
+async function mount(mode: WebMode, minimal = false): Promise<ESPHomeWebHeader> {
   const el = new ESPHomeWebHeader();
   (el as any)._localize = (k: string) => k;
   el.mode = mode;
@@ -37,42 +37,43 @@ async function mount(mode: "esp" | "pico", minimal = false): Promise<ESPHomeWebH
   return el;
 }
 
-describe("esphome-web-header switch target", () => {
-  it("targets Pico when the current mode is ESP", async () => {
+describe("esphome-web-header mode picker", () => {
+  it("renders the family picker on the current mode", async () => {
+    const el = await mount("rtl");
+    const picker = el.shadowRoot!.querySelector("esphome-web-mode-picker");
+    expect(picker).not.toBeNull();
+    expect(picker!.mode).toBe("rtl");
+  });
+
+  it("names every family on a button where they fit, the current one pressed", async () => {
+    const el = await mount("rtl");
+    const btns = [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>(".mode-btn")];
+    expect(btns.map((b) => b.textContent?.trim())).toEqual(
+      WEB_PLATFORMS.map((p) => p.labelKey)
+    );
+    expect(btns.map((b) => b.getAttribute("aria-pressed"))).toEqual(
+      WEB_PLATFORMS.map((p) => String(p.mode === "rtl"))
+    );
+  });
+
+  it("switches family from a button", async () => {
     const el = await mount("esp");
-
-    const btn = el.shadowRoot!.querySelector(".switch-btn");
-    expect(btn).not.toBeNull();
-    expect(btn!.getAttribute("aria-label")).toBe("web.header.switch_to_pico");
-    const logo = el.shadowRoot!.querySelector<HTMLImageElement>(".target-logo");
-    expect(logo!.getAttribute("src")).toContain("raspberry");
+    const picked: string[] = [];
+    el.addEventListener("set-mode", (e) => picked.push((e as CustomEvent).detail));
+    const last = WEB_PLATFORMS[WEB_PLATFORMS.length - 1];
+    const btns = el.shadowRoot!.querySelectorAll<HTMLButtonElement>(".mode-btn");
+    btns[btns.length - 1].click();
+    expect(picked).toEqual([last.mode]);
   });
 
-  it("targets ESP when the current mode is Pico", async () => {
-    const el = await mount("pico");
-
-    const btn = el.shadowRoot!.querySelector(".switch-btn");
-    expect(btn!.getAttribute("aria-label")).toBe("web.header.switch_to_esp");
-    const logo = el.shadowRoot!.querySelector<HTMLImageElement>(".target-logo");
-    expect(logo!.getAttribute("src")).toContain("espressif");
-  });
-
-  it("hides the switch in minimal (flash-receiver) mode", async () => {
+  it("hides the buttons and the picker in minimal (flash-receiver) mode", async () => {
     const el = await mount("esp", true);
-
-    expect(el.shadowRoot!.querySelector(".switch-btn")).toBeNull();
+    expect(el.shadowRoot!.querySelector("esphome-web-mode-picker")).toBeNull();
+    expect(el.shadowRoot!.querySelector(".mode-buttons")).toBeNull();
   });
 
-  // The kebab stays in minimal mode on purpose: a flash failure in the
-  // receiver popup is exactly when a user needs the report-issue link.
   it("keeps the kebab in minimal (flash-receiver) mode", async () => {
     const el = await mount("esp", true);
-
     expect(el.shadowRoot!.querySelector("esphome-web-header-actions")).not.toBeNull();
-  });
-
-  it("anchors the switch tooltip to the button id", async () => {
-    const el = await mount("esp");
-    expectTooltipsAnchored(el, 1);
   });
 });

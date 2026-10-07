@@ -7,9 +7,14 @@
  */
 
 import { secretHostSlug } from "./secret-eligibility.js";
-import { escapeYamlDoubleQuoted } from "./yaml-escape.js";
-import { splitTrimmedInlineComment, stripQuotes } from "./yaml-scalar.js";
-import { formatYamlScalar } from "./yaml-serialize.js";
+import {
+  decodeYamlDoubleQuoted,
+  decodeYamlSingleQuoted,
+  escapeYamlDoubleQuoted,
+  hasEscapeWorthyChar,
+} from "./yaml-escape.js";
+import { splitTrimmedInlineComment } from "./yaml-scalar.js";
+import { formatYamlScalar, isEsphomeTag } from "./yaml-serialize.js";
 
 export interface SecretEntry {
   /** Top-level key name. */
@@ -38,7 +43,7 @@ export interface SecretGroup {
 // kept verbatim (such a key is read-only anyway). Groups: double-quoted
 // name, single-quoted name, bare name, rest.
 const TOP_LEVEL_KEY =
-  /^(?:"((?:[^"\\\n]|\\.)+)"|'((?:[^'\n]|'')+)'|(<<|[A-Za-z_][A-Za-z0-9_.\-]*)):(?:[ \t]+([^\n]*))?$/;
+  /^(?:"((?:[^"\\\n]|\\.)+)"|'((?:[^'\n]|'')+)'|(<<|[A-Za-z_][A-Za-z0-9_.\-]*))[ \t]*:(?:[ \t]+([^\n]*))?$/;
 
 /** The key, its source quote (``"``, ``'`` or ``""``) and the rest of a matched line. */
 function keyParts(match: RegExpMatchArray): {
@@ -58,13 +63,6 @@ const VALID_KEY = /^[A-Za-z_][A-Za-z0-9_.\-]*$/;
 // anchor (&a) / alias (*a), a block scalar (| or >), or a flow
 // collection ([ ] / { }).
 const ADVANCED_VALUE_START = /^[!&*|>[{]/;
-
-// ``formatYamlScalar`` quotes most unsafe scalars (``:`` ``#`` leading
-// ``-`` / space / quote, booleans, numbers …) but not a value that
-// *starts* with a YAML indicator (``! & * | > [ ] { } @ \` %``). Written
-// bare, such a value reparses as a tag / anchor / block marker and
-// vanishes from the form, so force-quote it.
-const LEADING_INDICATOR = /^[!&*|>[\]{}@`%]/;
 
 /** Keys defined on more than one line; ESPHome rejects the file while any exist. */
 export function duplicateSecretKeys(entries: SecretEntry[]): Set<string> {
@@ -104,11 +102,23 @@ export function groupSecretsByDevice(entries: SecretEntry[]): SecretGroup[] {
   return ordered.map((device) => ({ device, entries: byDevice.get(device)! }));
 }
 
+// A secret value is never a tag, so the esphome tags the shared
+// formatter keeps bare are force-quoted here.
 function formatSecretValue(value: string): string {
-  if (value !== "" && LEADING_INDICATOR.test(value)) {
-    return `"${escapeYamlDoubleQuoted(value)}"`;
-  }
+  if (isEsphomeTag(value)) return `"${escapeYamlDoubleQuoted(value)}"`;
   return formatYamlScalar(value);
+}
+
+/** The inline scalar of the first top-level *key* entry ("" when absent), or null when the
+ *  value isn't inline-editable (alias, anchor, block, tag, multiline, or possibly merged in). */
+export function inlineSecretValue(yaml: string, key: string): string | null {
+  const entries = parseSecretsEntries(yaml);
+  const matches = entries.filter((e) => e.key === key);
+  // No direct line, but a merge key may supply it: don't report it as empty.
+  if (matches.length === 0) return entries.some((e) => e.key === "<<") ? null : "";
+  // YAML resolves a duplicate last-wins and ESPHome rejects the file; neither line is the value.
+  if (matches.length > 1) return null;
+  return matches[0].editable ? matches[0].value : null;
 }
 
 /** Parse *yaml* into one entry per top-level key line. */
@@ -179,14 +189,32 @@ function readValue(
 ): { value: string; editable: boolean } {
   const { value } = splitTrimmedInlineComment(rest ?? "");
   const trimmed = value.trim();
-  // A bare ``key:`` or a comment-only value (``key: # note``) is an editable
-  // empty scalar unless an indented block sits below it, which makes it
-  // advanced — editing it inline would orphan the nested children.
-  if (trimmed === "") {
-    return { value: "", editable: !hasIndentedChild(lines, index) };
-  }
+  // An indented line below continues this value (a nested block under a bare
+  // ``key:``, or a quoted / plain scalar wrapped onto more lines), so editing
+  // the first line alone would orphan or truncate it.
+  if (hasIndentedChild(lines, index)) return { value: "", editable: false };
+  // A bare ``key:`` or a comment-only value (``key: # note``) is an editable empty scalar.
+  if (trimmed === "") return { value: "", editable: true };
   if (ADVANCED_VALUE_START.test(trimmed)) return { value: "", editable: false };
-  return { value: stripQuotes(trimmed), editable: true };
+  const quote = trimmed[0];
+  if (quote !== '"' && quote !== "'") return { value: trimmed, editable: true };
+  // The decoder is the authority on what a quoted scalar may hold; anything it
+  // rejects (open or escaped closing quote, stray inner quote, escape it can't
+  // round-trip) is continued below or malformed, and a decoded control character
+  // (a line break is stripped, a tab or private-use glyph is invisible) can't be edited faithfully in
+  // the single-line input. All of those stay read-only rather than rendering
+  // through escapeControlForInput: that would need the symmetric unescape on
+  // every write path, for credentials that never legitimately hold one.
+  const closed = trimmed.length >= 2 && trimmed.endsWith(quote);
+  const body = trimmed.slice(1, -1);
+  const decoded = !closed
+    ? null
+    : quote === '"'
+      ? decodeYamlDoubleQuoted(body)
+      : decodeYamlSingleQuoted(body);
+  if (decoded === null || hasEscapeWorthyChar(decoded))
+    return { value: "", editable: false };
+  return { value: decoded, editable: true };
 }
 
 function hasIndentedChild(lines: string[], index: number): boolean {

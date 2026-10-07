@@ -8,23 +8,33 @@ vi.mock("sonner-js", () => ({ default: { error: vi.fn() } }));
 // Post-reset reopen goes through openLiveSerialPort (re-enumeration retry
 // loop); stub it so the suite can hand back the cached or a fresh handle.
 const { openLiveSerialPort } = vi.hoisted(() => ({ openLiveSerialPort: vi.fn() }));
-vi.mock("../../src/util/web-serial.js", () => ({ openLiveSerialPort }));
+vi.mock("../../src/util/serial-reacquire.js", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  openLiveSerialPort,
+}));
 
 import toast from "sonner-js";
-import { openImprovDialog } from "../../src/web/improv/open-improv-dialog.js";
+
+import { markOpenFailure } from "../../src/util/serial-open-error.js";
+import {
+  isImprovInProgress,
+  openImprovDialog,
+} from "../../src/web/improv/open-improv-dialog.js";
 
 const localize: (k: string, v?: Record<string, string | number>) => string = (k) => k;
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-function makePort(): {
+function makePort(info: SerialPortInfo = {}): {
   close: ReturnType<typeof vi.fn>;
   setSignals: ReturnType<typeof vi.fn>;
+  getInfo: () => SerialPortInfo;
   readable: unknown;
   writable: unknown;
 } {
   return {
     close: vi.fn(async () => {}),
     setSignals: vi.fn(async () => {}),
+    getInfo: () => info,
     readable: null,
     writable: null,
   };
@@ -77,6 +87,84 @@ describe("openImprovDialog", () => {
     await expect(promise).resolves.toEqual({ improv: true, provisioned: true });
   });
 
+  it("counts as in progress from the first await, before any dialog mounts", async () => {
+    let opened!: (port: SerialPort | null) => void;
+    openLiveSerialPort.mockImplementationOnce(
+      () => new Promise<SerialPort | null>((resolve) => (opened = resolve))
+    );
+    const port = makePort();
+    const promise = openImprovDialog(port as unknown as SerialPort, localize);
+    expect(isImprovInProgress()).toBe(true);
+    opened(null);
+    await promise;
+    expect(isImprovInProgress()).toBe(false);
+  });
+
+  it.each([
+    [
+      "a Pico's own port, even unasked (the ESP card after a dismissed flow switch)",
+      { usbVendorId: 0x2e8a, usbProductId: 0xf00a },
+      {},
+    ],
+    [
+      "any port when asked",
+      { usbVendorId: 0x303a, usbProductId: 0x1001 },
+      { keepLines: true },
+    ],
+  ])(
+    "keeps DTR asserted on %s (a Pico's CDC only transmits while DTR is up)",
+    async (_name, info, options) => {
+      const port = makePort(info);
+      const promise = openImprovDialog(port as unknown as SerialPort, localize, options);
+      await flush();
+      expect(port.setSignals).not.toHaveBeenCalled();
+      expect(dialogEl()).toBeTruthy();
+      dialogEl()!.dispatchEvent(new CustomEvent("closed", { detail: {} }));
+      await promise;
+    }
+  );
+
+  it("swallows the SDK's late state-request rejection while a dialog is up, and nothing else", async () => {
+    const port = makePort();
+    const promise = openImprovDialog(port as unknown as SerialPort, localize);
+    await flush();
+    const rejection = (reason: unknown) => {
+      const ev = new Event("unhandledrejection", { cancelable: true }) as Event & {
+        reason: unknown;
+      };
+      ev.reason = reason;
+      window.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    };
+    // Stands in for the dev server's error overlay, a plain window listener.
+    const overlay = vi.fn();
+    window.addEventListener("unhandledrejection", overlay);
+    try {
+      expect(rejection(new Error("Error fetching current state: TIMEOUT"))).toBe(true);
+      expect(overlay).not.toHaveBeenCalled();
+      expect(rejection(new Error("something else"))).toBe(false);
+      expect(overlay).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener("unhandledrejection", overlay);
+    }
+    // A device error on the same request is real news, not the SDK's race.
+    expect(rejection(new Error("Error fetching current state: BAD_HOSTNAME"))).toBe(
+      false
+    );
+    // The SDK's late rejection can land up to its RPC timeout after the close;
+    // the guard stays for that long and no longer.
+    dialogEl()!.dispatchEvent(new CustomEvent("closed", { detail: {} }));
+    await promise;
+    expect(rejection(new Error("Error fetching current state: TIMEOUT"))).toBe(true);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 30_000);
+      expect(rejection(new Error("Error fetching current state: TIMEOUT"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports improv-detected-but-not-provisioned and closes the port", async () => {
     const port = makePort();
     const promise = openImprovDialog(port as unknown as SerialPort, localize);
@@ -87,6 +175,62 @@ describe("openImprovDialog", () => {
     );
     await expect(promise).resolves.toEqual({ improv: true, provisioned: false });
     expect(port.close).toHaveBeenCalledOnce();
+  });
+
+  it("resolves only once the port closed, retrying while the SDK's reader holds it (#1839)", async () => {
+    const close = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new TypeError("stream is locked"))
+      .mockImplementationOnce(async () => {
+        port.readable = null;
+      });
+    const port = { ...makePort(), close };
+    const promise = openImprovDialog(port as unknown as SerialPort, localize);
+    await flush();
+    port.readable = { locked: true };
+    dialogEl()!.dispatchEvent(new CustomEvent("closed", { detail: {} }));
+    await promise;
+    expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it("resolves at the deadline when the close is still pending (a wedged driver)", async () => {
+    const close = vi.fn(() => new Promise<void>(() => {}));
+    const port = { ...makePort(), close };
+    const promise = openImprovDialog(port as unknown as SerialPort, localize);
+    await flush();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      void promise.then(() => (settled = true));
+      dialogEl()!.dispatchEvent(new CustomEvent("closed", { detail: {} }));
+      // It waits for the close right up to the deadline, then moves on.
+      await vi.advanceTimersByTimeAsync(999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(promise).resolves.toEqual({ improv: false, provisioned: false });
+      expect(close).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith("[Improv] Port close still pending; moving on");
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps retrying the close while only the SDK's writer still holds the port", async () => {
+    const close = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new TypeError("stream is locked"))
+      .mockImplementationOnce(async () => {
+        port.writable = null;
+      });
+    const port = { ...makePort(), close };
+    const promise = openImprovDialog(port as unknown as SerialPort, localize);
+    await flush();
+    port.writable = { locked: true };
+    dialogEl()!.dispatchEvent(new CustomEvent("closed", { detail: {} }));
+    await promise;
+    expect(close).toHaveBeenCalledTimes(2);
   });
 
   it("coerces a missing detail to a false/false result", async () => {
@@ -290,5 +434,24 @@ describe("openImprovDialog", () => {
     expect(result).toEqual({ improv: false, provisioned: false });
     expect(toast.error).toHaveBeenCalledOnce();
     expect(dialogEl()).toBeNull();
+  });
+
+  // A manual open says why it failed; right after a reset a NetworkError can
+  // be the board re-enumerating, so that keeps the restart advice.
+  it.each([
+    [false, "NetworkError", "serial.port_in_use"],
+    [false, "SecurityError", "serial.open_failed"],
+    [true, "NetworkError", "web.improv.open_failed"],
+  ])("afterReset %s with a %s open toasts %s", async (afterReset, name, key) => {
+    const err = new DOMException("Failed to open serial port.", name);
+    markOpenFailure(err);
+    openLiveSerialPort.mockImplementation(
+      async (_p: SerialPort, opts: { onFailed?: (err: unknown) => void }) => {
+        opts.onFailed?.(err);
+        return null;
+      }
+    );
+    await openImprovDialog(makePort() as unknown as SerialPort, localize, { afterReset });
+    expect(toast.error).toHaveBeenCalledWith(key);
   });
 });

@@ -95,19 +95,20 @@ export const CORE_CATEGORIES: ComponentCategory[] = [
   ComponentCategory.UPDATE,
 ];
 
-export interface ComponentCatalogEntry {
+/** A catalog list row; the body fields exist only on the full entry. */
+export interface ComponentCatalogIndexEntry {
   id: string;
   name: string;
   description: string;
   category: ComponentCategory;
-  docs_url: string;
-  image_url: string;
+  docs_url?: string;
+  image_url?: string;
   /** Other components this one requires to be configured. */
-  dependencies: string[];
+  dependencies?: string[];
   /** Whether the same component can be added multiple times. */
-  multi_conf: boolean;
+  multi_conf?: boolean;
   /** Empty list = works on every target platform. Non-empty = restricted to those. */
-  supported_platforms: string[];
+  supported_platforms?: string[];
   /** Interfaces this component can be referenced *as* beyond its own domain
    *  (an `adc` sensor provides `voltage_sampler`). */
   provides?: string[];
@@ -116,6 +117,12 @@ export interface ComponentCatalogEntry {
    *  key-paths to descend, keyed by interface (one per nested location).
    *  Absent for own-id providers. */
   provides_id_paths?: Record<string, string[][]>;
+  /** Classes this component's own top-level id inherits, sent only when some
+   *  `references_class` rejects it. For a typed hub, the default variant's. */
+  id_classes?: string[];
+  /** The same per variant of a typed hub, keyed by discriminator key then
+   *  value (modbus: `{ role: { client: [...], server: [...] } }`). */
+  id_classes_by_variant?: Record<string, Record<string, string[]>>;
   /** Requirements this component imposes on the bus it attaches to, keyed
    *  by bus id ('i2c' / 'spi' / 'uart'): exact-match values (baud_rate,
    *  parity, ...), range bounds (min/max_frequency in Hz) and required
@@ -125,6 +132,9 @@ export interface ComponentCatalogEntry {
    *  `spi`), so the card can chip its type alongside its recommendation
    *  status. Null/absent on regular entries. */
   underlying_category?: ComponentCategory | null;
+}
+
+export interface ComponentCatalogEntry extends ComponentCatalogIndexEntry {
   /** Cross-field cardinality constraints over the top-level `config_entries`
    *  (from ESPHome's `cv.has_*_one_key` validators). Nested-scope constraints
    *  live on the owning `nested` entry's `required_groups`. */
@@ -135,7 +145,7 @@ export interface ComponentCatalogEntry {
 }
 
 export interface PagedComponentsResponse extends PagedResponse {
-  components: ComponentCatalogEntry[];
+  components: ComponentCatalogIndexEntry[];
   categories: Array<{ id: string; name: string; count: number }>;
 }
 

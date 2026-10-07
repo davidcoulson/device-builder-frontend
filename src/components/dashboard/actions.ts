@@ -3,27 +3,24 @@ import type { BoardCatalogEntry } from "../../api/types/boards.js";
 import type { ConfiguredDevice } from "../../api/types/devices.js";
 import type { ArchivedDevice, BulkActionResult } from "../../api/types/system.js";
 import type { LocalizeFunc } from "../../common/localize.js";
-import { fetchBoard } from "../../util/board-body-cache.js";
+import { type BoardDetection, detectBoard } from "../../platforms/detect-board.js";
+import { EngineLoadError, UnsupportedChipError } from "../../platforms/esp/index.js";
 import { downloadBlob } from "../../util/download-text.js";
 import { getErrorMessage } from "../../util/error-message.js";
 import { navigate } from "../../util/navigation.js";
 import {
   LONG_TOAST_DURATION_MS,
   notifyError,
+  notifyInfo,
   type NotifyOptions,
   notifySuccess,
 } from "../../util/notify.js";
-import { streamSerialLines } from "../../util/serial-log-stream.js";
+import { type SerialLineHooks, streamSerialLines } from "../../util/serial-log-stream.js";
+import { openFailureMessage } from "../../util/serial-open-error.js";
 import {
-  connectToPort,
-  detectChip,
-  disconnect,
-  isPortPickerCancel,
-  readDeviceManifest,
-  readMacAddress,
-  UnsupportedChipError,
-} from "../../util/web-serial.js";
-import { chipNameToFilterLabel } from "../wizard/wizard-step-board-platforms.js";
+  resolveDetection,
+  type WizardBoardPreset,
+} from "../wizard/wizard-step-board-platforms.js";
 
 /** Open the editor. ``section`` deep-links a component section (read from
  *  ``?section=`` on load); ``reveal`` opts into the one-shot ``reveal=1``
@@ -299,7 +296,7 @@ export async function detectAndOpenWizard(
   createDialog: {
     open(step?: string): void;
     openWithBoard(board: BoardCatalogEntry): void;
-    openAtBoardStep(filterLabel?: string): void;
+    openAtBoardStep(preset: WizardBoardPreset | null): void;
   },
   options: {
     /** Port captured from the ``navigator.serial`` ``connect`` event —
@@ -318,35 +315,39 @@ export async function detectAndOpenWizard(
     localize?: LocalizeFunc;
   } = {}
 ): Promise<void> {
+  let detection: BoardDetection | null;
   try {
-    const detected = options.port
-      ? await connectToPort(options.port)
-      : await detectChip();
-    const chipName = detected.chipName;
-
-    // MAC lookup is best-effort — a failure here shouldn't sink the
-    // wizard fallback. Wrap in its own try so we always disconnect.
-    let recognized: ConfiguredDevice | null = null;
-    if (options.devices?.length && options.onRecognized) {
-      try {
-        const mac = await readMacAddress(detected.loader);
-        recognized =
-          options.devices.find(
-            (d) => d.mac_address && d.mac_address.toUpperCase() === mac
-          ) ?? null;
-      } catch {
-        // MAC read failed (unsupported chip family, transport flap);
-        // fall through to the wizard.
-      }
+    detection = await detectBoard(options.port ?? null, {
+      readMac: Boolean(options.devices?.length && options.onRecognized),
+    });
+  } catch (err) {
+    // Detection failed — the wizard still opens so the user can pick a board
+    // by hand, but the failure gets named instead of vanishing (#1414).
+    if (options.localize) {
+      notifyError(
+        err instanceof EngineLoadError
+          ? options.localize("firmware.engine_load_failed")
+          : err instanceof UnsupportedChipError
+            ? options.localize("serial.unsupported_chip", { chip: err.chipName })
+            : openFailureMessage(err, options.localize, "dashboard.serial_connect_failed")
+      );
     }
-
-    // Manifest lookup — runs only when MAC didn't match an existing
-    // device. ``readDeviceManifest`` already swallows read / parse
-    // failures and returns null, so this can't throw.
-    const manifest = recognized ? null : await readDeviceManifest(detected.loader);
-
-    await disconnect(detected.transport);
-
+    createDialog.open("board");
+    return;
+  }
+  // A dismissed picker still opens the wizard for a manual board pick.
+  if (!detection) {
+    createDialog.open("board");
+    return;
+  }
+  if (detection.kind === "esp") {
+    const board = detection.board;
+    const recognized =
+      board.mac && options.onRecognized
+        ? (options.devices?.find(
+            (d) => d.mac_address && d.mac_address.toUpperCase() === board.mac
+          ) ?? null)
+        : null;
     if (recognized && options.onRecognized) {
       if (options.localize) {
         notifySuccess(
@@ -358,42 +359,39 @@ export async function detectAndOpenWizard(
       options.onRecognized(recognized);
       return;
     }
+  }
 
-    if (manifest?.board_id) {
-      const board = await fetchBoard(api, manifest.board_id);
-      if (board) {
-        if (options.localize) {
-          notifySuccess(
-            options.localize("dashboard.serial_starterkit_detected", {
-              name: board.name,
-            })
-          );
-        }
-        createDialog.openWithBoard(board);
-        return;
-      }
-      // ``board_id`` in the manifest but the catalog doesn't know it
-      // (older dashboard / unreleased product). Fall through to the
-      // chip-family picker rather than failing — the user still
-      // gets a useful onboarding path.
-    }
-
-    createDialog.openAtBoardStep(chipNameToFilterLabel(chipName) ?? undefined);
-  } catch (err) {
-    // Detection failed (or the picker was cancelled) — the wizard still
-    // opens so the user can pick a board by hand, but a real connect
-    // failure gets named instead of vanishing (#1414).
-    if (!isPortPickerCancel(err) && options.localize) {
-      notifyError(
-        err instanceof UnsupportedChipError
-          ? options.localize("serial.unsupported_chip", { chip: err.chipName })
-          : options.localize("dashboard.serial_connect_failed", {
-              error: getErrorMessage(err),
-            })
+  // The port would not release after the banner read: the board is still
+  // named, but it has to be replugged before anything opens the port again.
+  if (detection.kind === "named" && detection.portHeld && options.localize) {
+    notifyInfo(options.localize("serial.port_held"));
+  }
+  // The board it named, else the picker narrowed to what was found (a
+  // platform from the USB ids or the banner, neither of which ran esptool,
+  // which would sit on a Pico's CDC waiting for a ROM loader, #1856; the
+  // ESP's chip; or nothing).
+  const landing = await resolveDetection(api, detection);
+  if ("board" in landing) {
+    if (options.localize) {
+      notifySuccess(
+        options.localize("dashboard.serial_starterkit_detected", {
+          name: landing.board.name,
+        })
       );
     }
-    createDialog.open("board");
+    createDialog.openWithBoard(landing.board);
+    return;
   }
+  // A board that named itself but was not found is said so before the
+  // picker opens, rather than vanishing without a trace.
+  if (landing.missedBoard && options.localize) {
+    notifyInfo(
+      options.localize("wizard.connect_your_board_unknown_catalog_board", {
+        board: landing.missedBoard,
+      })
+    );
+  }
+  createDialog.openAtBoardStep(landing.preset);
 }
 
 export async function fetchEncryptionKey(
@@ -428,13 +426,20 @@ export async function fetchEncryptionKey(
  */
 export function streamSerialToDialog(
   port: SerialPort,
-  dialog: {
-    _serialPaused?: boolean;
-    _noteSerialActivity(): void;
-    _enqueueLine(line: string): void;
-  }
-): () => void {
-  return streamSerialLines(port, {
+  dialog: LogLineSink
+): () => Promise<void> {
+  return streamSerialLines(port, dialogLineHooks(dialog));
+}
+
+interface LogLineSink {
+  _serialPaused?: boolean;
+  _noteSerialActivity(): void;
+  _enqueueLine(line: string): void;
+}
+
+/** Route finished lines into the dialog; any transport can feed these. */
+export function dialogLineHooks(dialog: LogLineSink): SerialLineHooks {
+  return {
     onLine: (line) => {
       // Keep draining while paused (Stop) but don't display (#526).
       if (!dialog._serialPaused) {
@@ -442,5 +447,5 @@ export function streamSerialToDialog(
         dialog._enqueueLine(line);
       }
     },
-  });
+  };
 }

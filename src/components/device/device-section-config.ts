@@ -1,4 +1,4 @@
-import { consume } from "@lit/context";
+import { consume, provide } from "@lit/context";
 import {
   mdiAlertCircleOutline,
   mdiDelete,
@@ -17,6 +17,7 @@ import {
   apiContext,
   localizeContext,
   resolvedComponentsContext,
+  valuesReadContext,
 } from "../../context/index.js";
 import { dangerBannerStyles } from "../../styles/banners.js";
 import { inputStyles } from "../../styles/inputs.js";
@@ -60,6 +61,7 @@ import {
 } from "./device-section-config/draft-and-delete.js";
 import {
   loadConfig,
+  noteYamlChange,
   type SectionConfigResponse,
 } from "./device-section-config/loading.js";
 import {
@@ -216,6 +218,9 @@ export class ESPHomeDeviceSectionConfig extends LitElement implements SectionEdi
   @state() _deleting = false;
 
   _loadId = 0;
+  /** Provided as ``valuesReadContext``. */
+  @provide({ context: valuesReadContext }) _valuesRead = 0;
+  _valuesStale = false;
   /** A retargeting load is in flight while the outgoing section is still
    *  on screen. The pane is inert meanwhile; the write fences cover
    *  programmatic dispatch, so nothing writes its values under the
@@ -315,6 +320,7 @@ export class ESPHomeDeviceSectionConfig extends LitElement implements SectionEdi
     ) {
       revalidateFields(this);
     }
+    if (changedProperties.has("yaml")) noteYamlChange(this);
     // loadConfig synchronously flips _loading/_error; running it in
     // willUpdate folds those into the in-progress render rather than
     // scheduling a second one.

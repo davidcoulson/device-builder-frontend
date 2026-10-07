@@ -2,6 +2,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { type FirmwareBinary, JobSource } from "../../api/types/firmware-jobs.js";
 import { FLASHER_HOST } from "../../common/docs.js";
 import { activeLocale } from "../../common/localize.js";
+import type { FlasherStep, FlasherStepView } from "../../platforms/platform-support.js";
 import { devicePlatform } from "../../util/crash-report.js";
 import { configurationStem, downloadAnsiText } from "../../util/download-text.js";
 import { formatElapsed } from "../../util/format-job-time.js";
@@ -89,6 +90,15 @@ export function renderResetSuggestion(
 // download-ready screens have no status icon — their bespoke bodies render in
 // the status-extra slot below.
 
+/** The active browser install flow's view of the current step, if the step is its own. */
+export function flasherStepView(
+  host: ESPHomeFirmwareInstallDialog
+): FlasherStepView | undefined {
+  const steps: Partial<Record<string, FlasherStepView>> | undefined =
+    host._flasher?.steps;
+  return steps?.[host._step];
+}
+
 // Reconnecting banner over the follow-backed phases only; the job keeps
 // running server-side and the flow re-attaches on reconnect.
 export function connectionLost(host: ESPHomeFirmwareInstallDialog): boolean {
@@ -112,9 +122,10 @@ export function cardState(host: ESPHomeFirmwareInstallDialog): ProcessTerminalSt
     case "downloading":
       return "running";
     default:
-      // Exhaustive: adding an InstallStep without mapping it here is a
-      // compile error (host._step is no longer narrowed to never).
-      return host._step satisfies never;
+      // What's left is a platform install flow's own step, which always runs. A
+      // shared step added without a case above is a compile error here.
+      host._step satisfies FlasherStep;
+      return "running";
   }
 }
 
@@ -122,6 +133,8 @@ function downloadReadyTitle(host: ESPHomeFirmwareInstallDialog): string {
   if (host._installer === "web-flash") {
     return host._localize("firmware.usb_built_title");
   }
+  const flasherCopy = host._flasher?.downloadReady;
+  if (flasherCopy) return host._localize(flasherCopy.titleKey);
   // binary-download
   const isElf = host._downloadedFilename.endsWith(".elf");
   return host._localize(
@@ -136,8 +149,10 @@ function downloadReadyDetail(host: ESPHomeFirmwareInstallDialog): string {
     if (host._errorMessage) return host._errorMessage;
     return host._localize("firmware.usb_built_body", { host: FLASHER_HOST });
   }
-  // binary-download
   const filename = host._downloadedFilename;
+  const flasherCopy = host._flasher?.downloadReady;
+  if (flasherCopy) return host._localize(flasherCopy.bodyKey, { filename });
+  // binary-download
   const isElf = filename.endsWith(".elf");
   return host._localize(
     isElf ? "firmware.elf_download_done_body" : "firmware.binary_download_done_body",
@@ -158,6 +173,11 @@ export function cardStatusDetail(host: ESPHomeFirmwareInstallDialog): string {
     return host._localize("firmware.choose_binary_desc");
   }
   if (host._step === "download-ready") return downloadReadyDetail(host);
+  const view = flasherStepView(host);
+  if (view) {
+    const key = typeof view.detailKey === "string" ? view.detailKey : view.detailKey();
+    return host._localize(key);
+  }
   if (host._step === "error") return host._errorMessage;
   // Hidden tabs throttle timers, which can stall the Web Serial write and fail
   // the flash; there's no API to opt out, so warn the user to stay on the page.
@@ -234,19 +254,27 @@ function renderDownloadReadyExtra(
     : nothing;
 }
 
+// The body a step adds under its status text; the steps are exclusive.
+function stepExtra(host: ESPHomeFirmwareInstallDialog): TemplateResult | typeof nothing {
+  switch (host._step) {
+    case "choose-binary":
+      return renderBinaryList(host);
+    case "download-ready":
+      return renderDownloadReadyExtra(host);
+    default:
+      return flasherStepView(host)?.extra?.(host) ?? nothing;
+  }
+}
+
 export function renderStatusExtra(
   host: ESPHomeFirmwareInstallDialog
 ): TemplateResult | typeof nothing {
-  const binaryList = host._step === "choose-binary" ? renderBinaryList(host) : nothing;
-  const downloadExtra =
-    host._step === "download-ready" ? renderDownloadReadyExtra(host) : nothing;
+  const extra = stepExtra(host);
   const logs = renderLogs(host);
   // Skip the slotted wrapper entirely when there's nothing to show, so the
   // card doesn't carry an empty element.
-  if (binaryList === nothing && downloadExtra === nothing && logs === nothing) {
-    return nothing;
-  }
-  return html`<div slot="status-extra">${binaryList} ${downloadExtra} ${logs}</div>`;
+  if (extra === nothing && logs === nothing) return nothing;
+  return html`<div slot="status-extra">${extra} ${logs}</div>`;
 }
 
 function downloadInstallLogs(host: ESPHomeFirmwareInstallDialog): void {
@@ -262,39 +290,18 @@ export function renderLogs(
 ): TemplateResult | typeof nothing {
   if (host._log.lines.length === 0) return nothing;
   return html`
-    <div class="logs-header">
-      <button
-        class="logs-toggle"
-        @click=${() => {
-          host._logsExpanded = !host._logsExpanded;
-        }}
-      >
-        <wa-icon
-          library="mdi"
-          name=${host._logsExpanded ? "chevron-up" : "chevron-down"}
-        ></wa-icon>
-        ${
-          host._logsExpanded
-            ? host._localize("firmware.hide_details")
-            : host._localize("firmware.show_details")
-        }
-      </button>
-      <button class="logs-toggle" @click=${() => downloadInstallLogs(host)}>
-        <wa-icon library="mdi" name="download"></wa-icon>
-        ${host._localize("dashboard.logs_download")}
-      </button>
-    </div>
-    ${
-      host._logsExpanded
-        ? html`<div class="logs-container">
-            <esphome-ansi-log
-              .lines=${host._log.lines}
-              .targetPlatform=${host._device ? devicePlatform(host._device) : ""}
-              ?light=${!host._darkMode}
-            ></esphome-ansi-log>
-          </div>`
-        : nothing
-    }
+    <esphome-install-details-log
+      .lines=${host._log.lines}
+      .targetPlatform=${host._device ? devicePlatform(host._device) : ""}
+      .expanded=${host._logsExpanded}
+      @expanded-changed=${(e: CustomEvent<boolean>) => {
+        host._logsExpanded = e.detail;
+      }}
+      @download-log=${(e: Event) => {
+        e.preventDefault();
+        downloadInstallLogs(host);
+      }}
+    ></esphome-install-details-log>
   `;
 }
 
@@ -310,11 +317,42 @@ export function renderFooter(host: ESPHomeFirmwareInstallDialog): TemplateResult
       </div>
     `;
   }
+  // A platform install flow's user-gesture step (reset into the bootloader, flash).
+  const bootloader = flasherStepView(host)?.footer?.();
+  if (bootloader) {
+    const { primary, secondary } = bootloader;
+    return html`
+      <div class="footer">
+        <button class="btn btn--ghost" @click=${host._close}>
+          ${host._localize("command.close")}
+        </button>
+        ${
+          secondary
+            ? html`<button
+                class="btn btn--ghost"
+                ?disabled=${host._flashBusy}
+                @click=${() => void secondary.run(host)}
+              >
+                ${host._localize(secondary.labelKey)}
+              </button>`
+            : nothing
+        }
+        <button
+          class="btn btn--primary"
+          ?disabled=${host._flashBusy}
+          @click=${() => void primary.run(host)}
+        >
+          ${host._localize(primary.labelKey)}
+        </button>
+      </div>
+    `;
+  }
   const isRunning =
     host._step !== "done" && host._step !== "error" && host._step !== "download-ready";
   if (isRunning) {
-    // Web Serial only — the download / web-flash installers don't connect.
-    const showToggle = host._installer === "web-serial";
+    // Installers whose flash leaves a port the logs can reopen.
+    const showToggle =
+      host._installer === "web-serial" || host._flasher?.holdsPort(host._device) === true;
     return html`
       <div class="footer">
         ${
@@ -380,7 +418,8 @@ export function renderFooter(host: ESPHomeFirmwareInstallDialog): TemplateResult
   // re-flashing wouldn't address those.
   const canRetry =
     host._step === "error" &&
-    (host._installer === "web-serial" || host._installer === "web-flash") &&
+    host._installer !== null &&
+    host._installer !== "binary-download" &&
     host._failureKind === null;
   if (canRetry) {
     return html`
@@ -409,12 +448,13 @@ export function renderFooter(host: ESPHomeFirmwareInstallDialog): TemplateResult
       </div>
     `;
   }
-  // Web Serial install success — surface "Logs" so users can flip back after
-  // they've clicked logs-dialog's "Back to install". _detected survives
-  // _onClose but not _close, so the button only renders while the SerialPort
-  // reference is still around.
+  // Browser-flash success — surface "Logs" so users can flip back after
+  // they've clicked logs-dialog's "Back to install". _logsPort survives
+  // _onClose but not _close. A flow that ended without a port (a Pico put
+  // into BOOTSEL by hand) can still pick one from the click.
   const canShowLogs =
-    host._installer === "web-serial" && host._step === "done" && host._detected !== null;
+    host._step === "done" &&
+    (host._logsPort !== null || host._flasher?.pickLogsPort !== undefined);
   return html`
     <div class="footer">
       ${

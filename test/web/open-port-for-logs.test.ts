@@ -7,7 +7,7 @@ vi.mock("@home-assistant/webawesome/dist/components/spinner/spinner.js", () => (
 vi.mock("sonner-js", () => ({ default: { error: vi.fn() } }));
 
 import toast from "sonner-js";
-import { openPortForLogs } from "../../src/web/logs/esphome-web-logs-dialog.js";
+import { openPortForLogs } from "../../src/web/logs/open-port-for-logs.js";
 
 const localize = (k: string) => k;
 
@@ -23,11 +23,53 @@ afterEach(() => vi.clearAllMocks());
 describe("openPortForLogs", () => {
   it("opens a closed port and returns true", async () => {
     const port = makePort(async () => {});
-    await expect(openPortForLogs(port as unknown as SerialPort, localize)).resolves.toBe(
-      true
-    );
+    await expect(
+      openPortForLogs(port as unknown as SerialPort, localize, {})
+    ).resolves.toBe(true);
     expect(port.open).toHaveBeenCalledWith({ baudRate: 115200, bufferSize: 8192 });
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("opens at the baud it is given", async () => {
+    const port = makePort(async () => {});
+    await openPortForLogs(port as unknown as SerialPort, localize, {}, 9600);
+    expect(port.open).toHaveBeenCalledWith({ baudRate: 9600, bufferSize: 8192 });
+  });
+
+  it("drops DTR and RTS after the open when asked to", async () => {
+    const setSignals = vi.fn(async () => {});
+    const port = { ...makePort(async () => {}), setSignals };
+    await expect(
+      openPortForLogs(port as unknown as SerialPort, localize, {
+        releaseLinesAfterOpen: true,
+      })
+    ).resolves.toBe(true);
+    expect(setSignals).toHaveBeenCalledWith({
+      dataTerminalReady: false,
+      requestToSend: false,
+    });
+  });
+
+  it("drops DTR and RTS on an already-open port too when asked to", async () => {
+    const setSignals = vi.fn(async () => {});
+    const port = {
+      ...makePort(
+        async () => {
+          throw new DOMException("already open", "InvalidStateError");
+        },
+        { locked: false }
+      ),
+      setSignals,
+    };
+    await expect(
+      openPortForLogs(port as unknown as SerialPort, localize, {
+        releaseLinesAfterOpen: true,
+      })
+    ).resolves.toBe(true);
+    expect(setSignals).toHaveBeenCalledWith({
+      dataTerminalReady: false,
+      requestToSend: false,
+    });
   });
 
   it("treats an already-open port with an unlocked reader as ready", async () => {
@@ -37,9 +79,9 @@ describe("openPortForLogs", () => {
       },
       { locked: false }
     );
-    await expect(openPortForLogs(port as unknown as SerialPort, localize)).resolves.toBe(
-      true
-    );
+    await expect(
+      openPortForLogs(port as unknown as SerialPort, localize, {})
+    ).resolves.toBe(true);
     expect(toast.error).not.toHaveBeenCalled();
   });
 
@@ -50,9 +92,9 @@ describe("openPortForLogs", () => {
       },
       { locked: true }
     );
-    await expect(openPortForLogs(port as unknown as SerialPort, localize)).resolves.toBe(
-      false
-    );
+    await expect(
+      openPortForLogs(port as unknown as SerialPort, localize, {})
+    ).resolves.toBe(false);
     expect(toast.error).toHaveBeenCalledOnce();
   });
 
@@ -60,9 +102,19 @@ describe("openPortForLogs", () => {
     const port = makePort(async () => {
       throw new Error("device gone");
     });
-    await expect(openPortForLogs(port as unknown as SerialPort, localize)).resolves.toBe(
-      false
-    );
+    await expect(
+      openPortForLogs(port as unknown as SerialPort, localize, {})
+    ).resolves.toBe(false);
     expect(toast.error).toHaveBeenCalledOnce();
+  });
+
+  it("says the port is in use when another tab or program holds it", async () => {
+    const port = makePort(async () => {
+      throw new DOMException("Failed to open serial port.", "NetworkError");
+    });
+    await expect(
+      openPortForLogs(port as unknown as SerialPort, localize, {})
+    ).resolves.toBe(false);
+    expect(toast.error).toHaveBeenCalledWith("serial.port_in_use");
   });
 });

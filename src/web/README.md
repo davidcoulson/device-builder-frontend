@@ -3,9 +3,12 @@
 The standalone, backend-free Web Serial tool published to
 [web.esphome.io](https://web.esphome.io). Everything runs in the
 browser: connect an ESP or Raspberry Pi Pico W over USB to install
-firmware, stream logs, and provision Wi-Fi via Improv. It shares the
+firmware, stream logs, and provision Wi-Fi via Improv; an nRF52 gets DFU
+installs, MCUboot updates over mcumgr, and logs, the last two over USB or
+Bluetooth; an RTL8720C or RTL8710B gets a LibreTiny UF2
+flashed through its ROM downloader and logs over its serial adapter. It shares the
 repo's `src/` tree (design system, the esptool-js flash engine in
-`src/util/web-serial.ts`, localization) and adds only this app.
+`src/platforms/esp/esptool.ts`, localization) and adds only this app.
 
 ## Dev server
 
@@ -35,23 +38,82 @@ hardware classes behave differently:
   same one — test both.
 - **UART bridges** (CP210x, CH34x): no re-enumeration; DTR/RTS reset
   pulses work.
-- **Pico W**: native-USB CDC; no DTR/RTS reset, and flashing goes
-  through UF2 (its own connect card and install dialog).
+- **RTL87xx** is one family on the site; the picked UF2's family picks the
+  chip's ROM downloader.
+- **RTL8720C boards** mostly sit on a USB serial adapter wired to the log
+  port (TX2, RX2, GND, a solid 3.3 V supply) and are strapped by hand (PA00).
+  On a kit with its own USB port (BW15 and the like, behind a CH340), RTS
+  drives CEN and DTR drives the PA00 download strap, so a plain open
+  (Chromium asserts both lines) holds the chip in reset. Every logs open releases
+  both lines right away (`RTL87XX_SERIAL_LOGS` in `src/platforms/rtl87xx/serial-logs.ts`); the install
+  dialog's engine drives them itself and falls back to the manual strap.
+- **RTL8710B modules** (BW12, WR3 and the like, on a plain adapter):
+  installing and the logs both go over UART2 (TX2 on PA30, RX2 on PA29).
+  The ROM downloader only starts when TX2 is low as the chip comes out of
+  reset: the engine pulses RTS in case it drives CEN, otherwise the user
+  holds TX2 to GND through a reset while the engine polls. The ROM links at
+  1.5 Mbaud and the writes run at 115200. Power the board from a solid
+  3.3 V supply; an adapter's own regulator often browns out mid flash.
+- **BK72xx modules** (CB3S, T1 and the like, on a plain adapter): installing
+  goes over UART1 (TX1, RX1) and the logs come from UART2 unless the
+  configuration moves them. There is no strap: a chip that runs ESPHome
+  reboots into its downloader when it sees the link packet, another one has
+  to be reset while the engine polls. Every logs open releases both lines
+  (`BK72XX_SERIAL_LOGS` in `src/platforms/bk72xx/serial-logs.ts`), and
+  Reset device pulses RTS: that resets a board whose adapter wires RTS to
+  CEN and does nothing on one wired TX, RX and GND only.
+- **LN882H modules** (WL2S and the like, on a plain adapter): installing
+  goes over UART0 (TX0 on PA2, RX0 on PA3) at 115200 and the logs come from
+  UART1 (TX1 on PB9) unless the configuration moves them. The BootROM only
+  listens when BOOT (GPIOA9) is low as the chip starts: the engine resets a
+  board whose adapter drives CEN and BOOT, otherwise the user holds BOOT to
+  GND through a reset until the flash starts. The engine first fetches the
+  vendor RAM code from ltchiptool's release on jsDelivr, pinned by SHA-256.
+  Every logs open releases both lines (`LN882X_SERIAL_LOGS` in
+  `src/platforms/ln882x/serial-logs.ts`).
+- **Pico W**: native-USB CDC; a DTR/RTS pulse does nothing, so the logs
+  dialog's Reset Device instead touches the port at 1200 baud into
+  BOOTSEL and reboots it over WebUSB (`RP2_SERIAL_LOGS` in
+  `src/platforms/rp2/serial-logs.ts`, shared with the Device Builder),
+  after which the CDC port re-enumerates; without WebUSB the button is
+  hidden. Flashing goes through UF2 (its own connect card and install
+  dialog).
 
 ## Where things live
 
-| Path                                   | What                                                                    |
-| -------------------------------------- | ----------------------------------------------------------------------- |
-| `entrypoint.ts` / `esphome-web-app.ts` | App shell                                                               |
-| `dashboard/`                           | Connect cards (ESP + Pico) and per-device action cards                  |
-| `install/`                             | Flash dialogs and the install flow controller                           |
-| `logs/`                                | Serial log viewer dialog                                                |
-| `improv/`                              | Wi-Fi provisioning dialog                                               |
-| `flash-receiver/`                      | Receives images from a Device Builder over the local network            |
-| `util/`                                | Web-only helpers (port disconnect watcher, firmware fetch, Pico filter) |
+| Path                                   | What                                                                                          |
+| -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `entrypoint.ts` / `esphome-web-app.ts` | App shell                                                                                     |
+| `web-mode.ts`, `header/`               | The modes (ESP, `?pico`, `?nrf`, `?rtl`, `?bk`, `?ln`) and the header, read from the registry |
+| `dashboard/`                           | The dashboard, the shared card shell and the unsupported-browser card                         |
+| `platforms/<name>/`                    | Each family's `mode.ts`, cards and install dialogs; `platforms/registry.ts` lists them        |
+| `install/`                             | Pieces the install dialogs share: the progress card and the file picker                       |
+| `logs/`                                | Log viewer dialog and its sources (Web Serial, Bluetooth for nRF52)                           |
+| `improv/`                              | Wi-Fi provisioning dialog                                                                     |
+| `flash-receiver/`                      | Flashes firmware a Device Builder hands over when it can't flash itself                       |
+| `util/`                                | Web-only helpers (firmware fetch, port pickers and release, disconnect watcher)               |
+
+### Adding a device family
+
+A family is a directory under `platforms/` with a `mode.ts` exporting its
+`WebPlatform` (`platforms/web-platform.ts`): its mode flag, header logo and
+label, intro copy, connect card, and the USB ids that claim a port for the
+flow switch toast, with its copy. Add it to `WEB_PLATFORMS` in
+`platforms/registry.ts`, put its logo in `public/web/static/logo/`, and its
+copy in `en.json`. The header, the dashboard, the mode URL and the flow switch
+need no edits. Its logs card passes the platform's `SerialLogsPolicy` (from
+`src/platforms/serial-logs.ts`, shared with the Device Builder: its Reset device
+and which lines an open or a reopen leaves up) to both the port open and the
+logs dialog's `policy`; the dialog's default is no reset.
+
+A family that is flashed from a LibreTiny UF2 over a USB serial adapter extends
+`LibreTinyCardElement` (`dashboard/libretiny-card-element.ts`) and `LibreTinyInstallDialog`
+(`install/libretiny-install-dialog.ts`) with its copy, its `SerialLogsPolicy` and how
+its file is parsed and written (see `platforms/rtl87xx/install.ts`).
 
 New copy goes in `src/translations/en.json` under the `web.*`
-namespace. Tests live in `test/web/` and run with the main suite
+namespace. Tests live in `test/web/` (platform tests in
+`test/web/platforms/<name>/`) and run with the main suite
 (`corepack pnpm test`); lint with `corepack pnpm run lint`.
 
 ## Build and deploy

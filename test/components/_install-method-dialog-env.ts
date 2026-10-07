@@ -1,10 +1,12 @@
-// Shared window/navigator Web Serial environment stub for the
+// Shared window/navigator Web Serial + Web Bluetooth environment stub for the
 // install-method-dialog suites. Descriptors are captured at import;
 // call restoreWebSerialEnv from afterEach.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const origSerial = Object.getOwnPropertyDescriptor(navigator, "serial");
 const origSecure = Object.getOwnPropertyDescriptor(window, "isSecureContext");
 const origLocation = Object.getOwnPropertyDescriptor(window, "location");
+const origBluetooth = Object.getOwnPropertyDescriptor(navigator, "bluetooth");
+const origBrave = Object.getOwnPropertyDescriptor(navigator, "brave");
 
 export function setWebSerialEnv(opts: {
   serial: boolean;
@@ -31,9 +33,36 @@ export function setLocalhostWithWebSerial(): void {
   setWebSerialEnv({ serial: true, secure: true, href: "http://localhost:6052/" });
 }
 
+/** Install the Web Bluetooth API object with the given availability query. */
+export function setBluetooth(
+  available: boolean,
+  getAvailability: () => Promise<boolean> = async () => true
+): void {
+  if (available) {
+    Object.defineProperty(navigator, "bluetooth", {
+      configurable: true,
+      value: { getAvailability },
+    });
+  } else if ("bluetooth" in navigator) {
+    delete (navigator as any).bluetooth;
+  }
+}
+
+/** Make the browser announce itself as Brave. */
+export function setBrave(): void {
+  Object.defineProperty(navigator, "brave", {
+    configurable: true,
+    value: { isBrave: async () => true },
+  });
+}
+
 export function restoreWebSerialEnv(): void {
   if (origSerial) Object.defineProperty(navigator, "serial", origSerial);
   else if ("serial" in navigator) delete (navigator as any).serial;
   if (origSecure) Object.defineProperty(window, "isSecureContext", origSecure);
   if (origLocation) Object.defineProperty(window, "location", origLocation);
+  if (origBluetooth) Object.defineProperty(navigator, "bluetooth", origBluetooth);
+  else if ("bluetooth" in navigator) delete (navigator as any).bluetooth;
+  if (origBrave) Object.defineProperty(navigator, "brave", origBrave);
+  else if ("brave" in navigator) delete (navigator as any).brave;
 }

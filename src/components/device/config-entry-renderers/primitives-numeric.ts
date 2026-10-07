@@ -17,10 +17,12 @@ import {
 import { formatHexInt, parseHexInt } from "../../../util/hex-int.js";
 import { coerceIntFieldValue } from "../../../util/int-input.js";
 import {
+  clampTimePeriodUnit,
+  durationMappingAsScalar,
   parseTimePeriodScalar,
   serializeTimePeriod,
-  TIME_PERIOD_UNITS,
   type TimePeriodUnit,
+  timePeriodUnitsFor,
 } from "../../../util/time-period.js";
 import {
   effectiveDisabled,
@@ -169,22 +171,31 @@ function hexDisplayOrFallback(rawValue: unknown): string {
 
 /**
  * Time-period field: ESPHome accepts "<value><unit>" strings like
- * "5s" / "100ms" / "30min" / "1h" (and "5" = 5 seconds, "1h30s" =
- * compound — the latter is rare enough that we render it as a
- * plain text fallback when parsing fails).
+ * "5s" / "100ms" / "30min" / "1h" ("1h30s" is a compound, rare enough
+ * that we render it as a plain text fallback when parsing fails). A
+ * number with no unit is rejected, so it shows with no unit picked.
  *
  * Splits the value into a numeric input + a unit picker so the
  * user never has to remember the suffix grammar. Serializes back
  * to a single "<value><unit>" string on every change so the
  * backend's parser handles it the same as if the user had typed
  * it raw into YAML.
+ *
+ * The picker offers only the units the entry's ``duration_min_unit``
+ * allows: ESPHome rejects a finer one ("Maximum precision is
+ * milliseconds").
  */
 export function renderTimePeriodField(
   entry: ConfigEntry,
   path: string[],
   ctx: RenderCtx
 ) {
-  const raw = ctx.getAt(path);
+  const stored = ctx.getAt(path);
+  // A whole-body duration may arrive in its mapping form (``{seconds: 2}``).
+  // A single unit reads as the scalar it is equivalent to, and an edit
+  // writes that scalar; a multi-unit mapping falls to the bail below.
+  const raw =
+    (entry.accepts_duration_mapping ? durationMappingAsScalar(stored) : null) ?? stored;
   // Bail above parseTimePeriodScalar — its ``String(raw).trim()`` would
   // turn a single-element list ``["5s"]`` into the parseable string
   // ``"5s"`` and a save would clobber the original list.
@@ -210,13 +221,24 @@ export function renderTimePeriodField(
     defaultParsed && defaultParsed.parseable ? defaultParsed.value : "";
   // When the user hasn't touched the field yet, seed the unit
   // picker with the default's unit so the round-tripped widget
-  // matches what they'd see if they typed the catalog default.
-  const displayUnit =
-    raw !== undefined && raw !== null && raw !== ""
-      ? parsed.unit
-      : defaultParsed?.parseable
-        ? defaultParsed.unit
-        : parsed.unit;
+  // matches what they'd see if they typed the catalog default. Only a
+  // stored unit is kept when it is finer than the entry accepts. A stored
+  // bare number has none, and ESPHome rejects it, so the picker shows no
+  // selection until the user picks one or edits the number. A unit picked
+  // while the field is empty has no value to live in, so it is held as the
+  // form's pending unit until a number is typed.
+  const hasValue = raw !== undefined && raw !== null && raw !== "";
+  const hasUnit = hasValue && !parsed.unitless;
+  const offered = timePeriodUnitsFor(entry.duration_min_unit);
+  const pendingUnit = offered.find((u) => u === ctx.getPendingUnit(path));
+  const displayUnit = hasUnit
+    ? parsed.unit
+    : (pendingUnit ??
+      clampTimePeriodUnit(
+        defaultParsed?.parseable ? defaultParsed.unit : parsed.unit,
+        entry.duration_min_unit
+      ));
+  const selectedUnit = hasValue && !hasUnit ? null : displayUnit;
   return html`
     <div class="field time-period" data-field-key=${fieldKeyAttr(path)}>
       ${renderLabel(entry, ctx, { path })}
@@ -235,15 +257,23 @@ export function renderTimePeriodField(
         />
         <wa-select
           data-no-value-sync
+          aria-label=${ctx.localize("device.automation_action_delay_unit")}
+          placeholder=${ctx.localize("device.automation_action_delay_unit")}
           ?disabled=${disabled}
           @change=${(e: Event) => {
             const nextUnit = (e.target as HTMLSelectElement).value as TimePeriodUnit;
-            ctx.emitChange(path, serializeTimePeriod(parsed.value, nextUnit));
+            ctx.setPendingUnit(path, nextUnit);
+            if (hasValue) {
+              ctx.emitChange(path, serializeTimePeriod(parsed.value, nextUnit));
+            }
           }}
         >
-          ${TIME_PERIOD_UNITS.map(
+          ${(hasUnit
+            ? timePeriodUnitsFor(entry.duration_min_unit, displayUnit)
+            : offered
+          ).map(
             (u) =>
-              html`<wa-option value=${u} ?selected=${u === displayUnit}
+              html`<wa-option value=${u} ?selected=${u === selectedUnit}
                 >${ctx.localize(`device.automation_action_delay_unit_${u}`)}</wa-option
               >`
           )}

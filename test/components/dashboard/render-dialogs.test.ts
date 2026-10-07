@@ -3,7 +3,8 @@
  *
  * Pins renderDialogs' install-method dialog bindings: deviceState
  * comes from the selected device's runtime_state, falling back to
- * UNKNOWN when no device is set.
+ * UNKNOWN when no device is set, and the platform and the chip come
+ * from the device too.
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -19,6 +20,8 @@ import { makeConfiguredDevice } from "../../_make-configured-device.js";
 import type { ConfiguredDevice } from "../../../src/api/types/devices.js";
 import { DeviceState } from "../../../src/api/types/devices.js";
 import { renderDialogs } from "../../../src/components/dashboard/render-dialogs.js";
+import type { AnyBrowserInstall } from "../../../src/platforms/platform-support.js";
+import { installsFor } from "../../../src/platforms/registry.js";
 import { makeDashboardHost } from "./_host.js";
 
 function renderInstallMethodDialog(device: ConfiguredDevice | null) {
@@ -36,7 +39,11 @@ function renderInstallMethodDialog(device: ConfiguredDevice | null) {
   const container = renderInto(renderDialogs(host));
   const dialog = container.querySelector("esphome-install-method-dialog");
   expect(dialog).not.toBeNull();
-  return dialog as HTMLElement & { deviceState: DeviceState };
+  return dialog as HTMLElement & {
+    deviceState: DeviceState;
+    deviceTargetPlatform: string;
+    platformInstalls: readonly AnyBrowserInstall[];
+  };
 }
 
 describe("renderDialogs install-method dialog", () => {
@@ -49,5 +56,14 @@ describe("renderDialogs install-method dialog", () => {
 
   it("falls back to UNKNOWN when no device is selected", () => {
     expect(renderInstallMethodDialog(null).deviceState).toBe(DeviceState.UNKNOWN);
+  });
+
+  it("binds the selected device's platform and the flashers it can take", () => {
+    const device = makeConfiguredDevice({ target_platform: "rtl87xx", mcu: "rtl8720c" });
+    const dialog = renderInstallMethodDialog(device);
+    expect(dialog.deviceTargetPlatform).toBe("rtl87xx");
+    expect(dialog.platformInstalls).toEqual(installsFor(device));
+    expect(dialog.platformInstalls).toHaveLength(1);
+    expect(renderInstallMethodDialog(null).platformInstalls).toEqual([]);
   });
 });

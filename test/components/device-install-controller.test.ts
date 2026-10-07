@@ -56,6 +56,22 @@ describe("DeviceInstallController.deviceState", () => {
   });
 });
 
+describe("DeviceInstallController.platformInstalls", () => {
+  it("returns the flashers the device's platform and chip take", () => {
+    const ctrl = new DeviceInstallController(
+      makeHost(makeConfiguredDevice({ target_platform: "rp2", mcu: "rp2040" }))
+    );
+    expect(ctrl.deviceTargetPlatform).toBe("rp2");
+    expect(ctrl.platformInstalls.map((i) => i.id)).toEqual(["rp2-uf2"]);
+  });
+
+  it("is empty for a chip no flasher writes and with no device loaded", () => {
+    const other = makeConfiguredDevice({ target_platform: "rtl87xx", mcu: "rtl8711am" });
+    expect(new DeviceInstallController(makeHost(other)).platformInstalls).toEqual([]);
+    expect(new DeviceInstallController(makeHost(null)).platformInstalls).toEqual([]);
+  });
+});
+
 describe("DeviceInstallController.methodMode", () => {
   it("defaults to install", () => {
     expect(new DeviceInstallController(makeHost(null)).methodMode).toBe("install");

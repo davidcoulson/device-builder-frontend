@@ -54,6 +54,10 @@ export function renderInto(tpl: unknown): HTMLElement {
 /** Identity localize stub for host fakes: returns the key unchanged. */
 export const identityLocalize = (key: string): string => key;
 
+/** Localize stub that keeps the key and its argument values visible: "key | arg | arg". */
+export const argsLocalize = (key: string, args?: Record<string, unknown>): string =>
+  [key, ...Object.values(args ?? {})].join(" | ");
+
 /**
  * Click ``target`` and return which of ``names`` fired on ``listenOn``,
  * in order — the "emits A, not B" assertion is then a single
@@ -169,4 +173,14 @@ export async function flushMicrotasks(times: number): Promise<void> {
 /** ``flush`` for suites under ``vi.useFakeTimers``: run zero-delay fake timers. */
 export async function flushTimers(): Promise<void> {
   await vi.advanceTimersByTimeAsync(0);
+}
+
+/** The rendered ``.menu-item`` whose label is the translation key. */
+export function findMenuItem(
+  el: { shadowRoot: ShadowRoot | null },
+  key: string
+): HTMLElement | undefined {
+  return [...el.shadowRoot!.querySelectorAll<HTMLElement>(".menu-item")].find((item) =>
+    item.textContent!.includes(key)
+  );
 }
