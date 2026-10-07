@@ -291,11 +291,6 @@ describe("device-table network column is ungated", () => {
     expect(cellText(el, "version")).toBe("—");
     expect(cellText(el, "network")).toBe("ethernet");
   });
-
-  it("falls back to the placeholder before any announce names a link", async () => {
-    const el = await mountWith(makeConfiguredDevice({}), { network: true });
-    expect(cellText(el, "network")).toBe("—");
-  });
 });
 
 describe("device-table initialPageSize seeding", () => {

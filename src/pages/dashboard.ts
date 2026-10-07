@@ -276,8 +276,7 @@ export class ESPHomePageDashboard extends LitElement {
   @state() _selectedAreas: string[] = [];
   /** ``target_platform`` stems selected in the Platform facet. */
   @state() _selectedPlatforms: string[] = [];
-  /** ``network`` values (``wifi`` / ``ethernet``) selected in the
-   *  Network facet. */
+  /** ``network`` values selected in the Network facet. */
   @state() _selectedNetworks: string[] = [];
   /** ``DeviceState`` values selected in the Status facet. */
   @state() _selectedStates: string[] = [];
@@ -834,11 +833,10 @@ export class ESPHomePageDashboard extends LitElement {
    *  update-status use AND semantics (labels: a device must carry
    *  every selected label, the original "drill down by tag stack";
    *  updates: a device must satisfy every selected bucket); area,
-   *  platform, network and status use OR within the facet
-   *  and AND across facets, the conventional faceted-search shape.
+   *  platform, network, and status use OR within the facet and AND across
+   *  facets, the conventional faceted-search shape.
    *
-   *  Memoised on the six upstream references (``devices`` plus
-   *  the five selection arrays) so the two callers inside one
+   *  Memoised on ``devices`` plus the selection arrays so the two callers inside one
    *  render cycle (``render()`` and ``_currentlyVisibleConfigurations``)
    *  share a single filter pass. Lit's reactive @state pattern
    *  hands out new array references on every selection change,

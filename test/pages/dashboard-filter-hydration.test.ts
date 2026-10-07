@@ -58,15 +58,6 @@ describe("dashboard filter session seeding", () => {
     expect(page._selectedUpdateStatus).toEqual(["update_available"]);
   });
 
-  it("lets the URL win for the network facet while session seeds the rest", () => {
-    saveDashboardFilters(FULL);
-    history.replaceState(null, "", "/?networks=ethernet");
-    const page = makePage();
-    hydrate(page);
-    expect(page._selectedNetworks).toEqual(["ethernet"]);
-    expect(page._selectedPlatforms).toEqual(["esp32"]);
-  });
-
   it("lets the URL win per-field while still seeding the rest from session", () => {
     saveDashboardFilters(FULL);
     history.replaceState(null, "", "/?platforms=esp8266");

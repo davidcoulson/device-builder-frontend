@@ -67,13 +67,7 @@ function tallyToFacet(
  *  an area the dashboard guards on the empty-options check above
  *  and hides the pill entirely. */
 export function computeAreaFacet(devices: ConfiguredDevice[]): FacetOption[] {
-  const counts = new Map<string, number>();
-  for (const d of devices) {
-    const area = d.area?.trim();
-    if (!area) continue;
-    counts.set(area, (counts.get(area) ?? 0) + 1);
-  }
-  return tallyToFacet(counts, (raw) => raw);
+  return tallyValues(devices, (d) => d.area);
 }
 
 /** Platform facet — derived from ``target_platform`` (esp32,
@@ -82,24 +76,24 @@ export function computeAreaFacet(devices: ConfiguredDevice[]): FacetOption[] {
  *  that's what users see in YAML / docs and an aliasing layer
  *  would lie about what the device actually runs. */
 export function computePlatformFacet(devices: ConfiguredDevice[]): FacetOption[] {
-  const counts = new Map<string, number>();
-  for (const d of devices) {
-    const platform = d.target_platform?.trim();
-    if (!platform) continue;
-    counts.set(platform, (counts.get(platform) ?? 0) + 1);
-  }
-  return tallyToFacet(counts, (raw) => raw);
+  return tallyValues(devices, (d) => d.target_platform);
 }
 
-/** Network facet — derived from the ``network`` TXT the device
- *  announced over (``wifi`` / ``ethernet``). Raw wire values, like
- *  the platform facet: that's what the YAML and docs call them. */
+/** Network facet — the raw ``network`` TXT value (``wifi`` / ``ethernet``), like platform. */
 export function computeNetworkFacet(devices: ConfiguredDevice[]): FacetOption[] {
+  return tallyValues(devices, (d) => d.runtime_state.network);
+}
+
+/** Tally one trimmed string field per device, dropping empty values. */
+function tallyValues(
+  devices: ConfiguredDevice[],
+  read: (d: ConfiguredDevice) => string | null | undefined
+): FacetOption[] {
   const counts = new Map<string, number>();
   for (const d of devices) {
-    const network = d.runtime_state.network?.trim();
-    if (!network) continue;
-    counts.set(network, (counts.get(network) ?? 0) + 1);
+    const value = read(d)?.trim();
+    if (!value) continue;
+    counts.set(value, (counts.get(value) ?? 0) + 1);
   }
   return tallyToFacet(counts, (raw) => raw);
 }

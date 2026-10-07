@@ -296,11 +296,7 @@ export function createDeviceColumns(
       enableHiding: true,
     },
     {
-      // Raw wire value (``wifi`` / ``ethernet``) rather than a
-      // prettified label, for the same reason the platform column
-      // carries the raw stem: it's what the YAML and the docs call
-      // it, and an aliasing layer would lie about what the device
-      // actually announced over.
+      // Raw wire value, like the platform column.
       accessorKey: "network",
       header: localize("dashboard.table_col_network"),
       cell: (info) => valueCell("cell-badge", info.getValue() as string),

@@ -52,10 +52,7 @@ export interface DeviceRuntimeState {
    * mtime-based change detection.
    */
   deployed_config_hash: string;
-  /** The link the device announced over (``"wifi"`` / ``"ethernet"``),
-   *  from the mDNS TXT. Descriptive and backend-persisted, so it renders
-   *  ungated by ``deployedIdentityTrusted``. Empty until an announce
-   *  carries the key (pre-2023.6 firmware omits it). */
+  /** Link from the mDNS ``network`` TXT (``"wifi"`` / ``"ethernet"``); empty until announced. */
   network: string;
   /** Indicates if an offline update has been compiled and is waiting for the device to wake up */
   queued_update: boolean;

@@ -15,7 +15,6 @@ export interface DeviceRow {
   mac_address: string;
   platform: string;
   version: string;
-  /** Link the device announced over, ungated (it carries no update verdict). */
   network: string;
   comment: string;
   area: string;

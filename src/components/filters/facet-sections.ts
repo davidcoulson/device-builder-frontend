@@ -58,10 +58,9 @@ function renderLabelsFilter(ctx: FacetSectionsContext): TemplateResult {
 /**
  * The accordion sections, in canonical order. Mirrors the dashboard's
  * render rules: labels / status always render (status only off in YAML
- * mode), area / platform / network / updates surface only when the
- * fleet has something to filter by, and labels / status / network /
- * updates are suppressed in YAML mode (runtime + metadata facets don't
- * apply to YAML matches).
+ * mode), area / platform / network / updates surface only when the fleet has
+ * something to filter by, and labels / status / network / updates are suppressed
+ * in YAML mode (runtime + metadata facets don't apply to YAML matches).
  */
 export function renderFacetSections(ctx: FacetSectionsContext): TemplateResult {
   const { devices, localize, selection, yamlMode } = ctx;

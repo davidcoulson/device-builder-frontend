@@ -12,8 +12,8 @@ import "../filters/filters-popover.js";
  *  one per dimension, so the toolbar stays one line regardless of
  *  how many dimensions or selections are active. The labels section
  *  always renders (it is the create path even when the catalog is
- *  empty); area / platform / network only render when the
- *  configured-device list has at least one usable value to filter by, so a fresh
+ *  empty); area / platform / network only render when the configured-device
+ *  list has at least one usable value to filter by, so a fresh
  *  dashboard with a single-platform fleet doesn't sprout an empty /
  *  single-bucket section that adds no signal.
  *

@@ -2,8 +2,8 @@
  * Pure device-list filtering for the dashboard's faceted toolbar.
  *
  * The dashboard renders the configured-device list through a fixed
- * pipeline: facet narrowing (labels / area / platform / network /
- * state / update-status) followed by a free-text name search. Lifting that
+ * pipeline: facet narrowing (labels / area / platform / network / state /
+ * update-status) followed by a free-text name search. Lifting that
  * pipeline out of the component keeps the rules testable over plain
  * arrays — no Lit element, no ``window``, no DOM — and gives the
  * "are any filters active?" / "how many facet pills are lit?"
@@ -19,15 +19,13 @@ import { matchesDeviceName, matchesMacAddress } from "./device-search.js";
 import { effectiveDeviceState } from "./device-status.js";
 import { UPDATE_FACET_BUCKETS, UPDATE_FACET_PREDICATES } from "./facets.js";
 
-/** The facet selections the toolbar tracks. Each is the list of
- *  currently-checked option ids for that facet (empty = facet not
- *  narrowing). */
+/** The facet selections the toolbar tracks. Each is the list
+ *  of currently-checked option ids for that facet (empty = facet
+ *  not narrowing). */
 export interface FacetSelection {
   selectedLabels: string[];
   selectedAreas: string[];
   selectedPlatforms: string[];
-  /** ``network`` values (``wifi`` / ``ethernet``) selected in the
-   *  Network facet. */
   selectedNetworks: string[];
   selectedStates: string[];
   selectedUpdateStatus: string[];
@@ -38,10 +36,9 @@ export interface FacetSelection {
  *
  * Labels and update-status use AND semantics (a device must carry
  * every selected label / satisfy every selected update bucket — the
- * "drill down by tag stack" shape); area, platform, network and
- * state use OR within the facet and AND across facets, the
- * conventional faceted-search shape. An empty selection array leaves
- * that facet inactive.
+ * "drill down by tag stack" shape); area, platform, network, and state use OR
+ * within the facet and AND across facets, the conventional faceted-
+ * search shape. An empty selection array leaves that facet inactive.
  */
 export function applyFacetFilters(
   devices: ConfiguredDevice[],

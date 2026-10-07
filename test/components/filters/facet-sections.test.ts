@@ -69,8 +69,7 @@ const keys = (sections: HTMLElement[]) => sections.map((s) => s.dataset.facetKey
 describe("renderFacetSections", () => {
   it("renders labels + area + platform + status + updates when the fleet warrants", () => {
     const { sections } = mount();
-    // Two distinct platforms (>1), one named area (>0), both update
-    // buckets. No fixture announces a network, so that section stays hidden.
+    // Two distinct platforms (>1), one named area (>0), both update buckets.
     expect(keys(sections)).toEqual(["labels", "area", "platform", "status", "updates"]);
   });
 
@@ -79,44 +78,16 @@ describe("renderFacetSections", () => {
     expect(keys(sections)).toEqual(["area", "platform"]);
   });
 
-  it("needs two networks before the network section is worth a pill", () => {
-    const oneLink = [
-      makeConfiguredDevice({
-        configuration: "a.yaml",
-        runtime_state: { network: "wifi" },
-      }),
-      makeConfiguredDevice({
-        configuration: "b.yaml",
-        runtime_state: { network: "wifi" },
-      }),
-    ];
+  it("shows network only for two or more links, and never in YAML mode", () => {
+    const linked = (network: string, configuration: string) =>
+      makeConfiguredDevice({ configuration, runtime_state: { network } });
+    const oneLink = [linked("wifi", "a.yaml"), linked("wifi", "b.yaml")];
+    const mixed = [linked("wifi", "a.yaml"), linked("ethernet", "b.yaml")];
     expect(keys(mount({ devices: oneLink }).sections)).not.toContain("network");
-
-    const mixed = [
-      makeConfiguredDevice({
-        configuration: "a.yaml",
-        runtime_state: { network: "wifi" },
-      }),
-      makeConfiguredDevice({
-        configuration: "b.yaml",
-        runtime_state: { network: "ethernet" },
-      }),
-    ];
     expect(keys(mount({ devices: mixed }).sections)).toContain("network");
-  });
-
-  it("suppresses network in YAML mode, since it is mDNS-observed", () => {
-    const devices = [
-      makeConfiguredDevice({
-        configuration: "a.yaml",
-        runtime_state: { network: "wifi" },
-      }),
-      makeConfiguredDevice({
-        configuration: "b.yaml",
-        runtime_state: { network: "ethernet" },
-      }),
-    ];
-    expect(keys(mount({ devices, yamlMode: true }).sections)).not.toContain("network");
+    expect(keys(mount({ devices: mixed, yamlMode: true }).sections)).not.toContain(
+      "network"
+    );
   });
 
   it("forwards manageLabels to the labels section's managed property", () => {
