@@ -52,7 +52,8 @@ export interface DeviceRuntimeState {
    * mtime-based change detection.
    */
   deployed_config_hash: string;
-  /** Link from the mDNS ``network`` TXT (``"wifi"`` / ``"ethernet"``); empty until announced. */
+  /** Link from the mDNS ``network`` TXT (``"wifi"`` / ``"ethernet"`` / ``"thread"``, an open
+   *  string); empty until announced. */
   network: string;
   /** Indicates if an offline update has been compiled and is waiting for the device to wake up */
   queued_update: boolean;

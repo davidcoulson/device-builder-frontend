@@ -12,7 +12,7 @@
  *  - ``areas``     — comma-separated area names
  *  - ``platforms`` — comma-separated target_platform values
  *  - ``networks``  — comma-separated mDNS network values
- *                    (``wifi`` / ``ethernet``)
+ *                    (``wifi`` / ``ethernet`` / ``thread``)
  *  - ``states``    — comma-separated DeviceState values
  *  - ``updates``   — comma-separated update-status buckets
  *                    (``update_available`` / ``modified``; AND semantics)

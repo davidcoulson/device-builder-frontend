@@ -79,7 +79,7 @@ export function computePlatformFacet(devices: ConfiguredDevice[]): FacetOption[]
   return tallyValues(devices, (d) => d.target_platform);
 }
 
-/** Network facet — the raw ``network`` TXT value (``wifi`` / ``ethernet``), like platform. */
+/** Network facet — the raw ``network`` TXT value (``wifi`` / ``ethernet`` / ``thread``), like platform. */
 export function computeNetworkFacet(devices: ConfiguredDevice[]): FacetOption[] {
   return tallyValues(devices, (d) => d.runtime_state.network);
 }
