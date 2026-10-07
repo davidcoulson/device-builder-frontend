@@ -1986,6 +1986,10 @@ describe("ESPHomeAPI — getAvailableAutomations", () => {
 });
 
 describe("ESPHomeAPI — getAutomationBodies", () => {
+  type Sent = { message_id: string; args: { refs: unknown[] } };
+  const a = { type: "actions", id: "a" } as const;
+  const b = { type: "actions", id: "b" } as const;
+
   beforeEach(() => {
     installMockWebSocket();
   });
@@ -2010,8 +2014,15 @@ describe("ESPHomeAPI — getAutomationBodies", () => {
     ws.receive({
       message_id: ws.sentAs<{ message_id: string }>(0).message_id,
       result: {
-        "actions/delay": { id: "delay", name: "Delay", domain: "core" },
-        "actions/logger.log": { id: "logger.log", name: "Log", config_entries: entries },
+        bodies: {
+          "actions/delay": { id: "delay", name: "Delay", domain: "core" },
+          "actions/logger.log": {
+            id: "logger.log",
+            name: "Log",
+            config_entries: entries,
+          },
+        },
+        remaining: [],
       },
     });
     await expect(pending).resolves.toEqual({
@@ -2026,6 +2037,41 @@ describe("ESPHomeAPI — getAutomationBodies", () => {
 
     expect(await api.getAutomationBodies([])).toEqual({});
     expect(ws.sent).toHaveLength(0);
+  });
+
+  it("re-requests ``remaining`` until every page is in", async () => {
+    const api = makeApi();
+    const ws = await connect(api);
+    const pending = api.getAutomationBodies([a, b]);
+    const first = ws.sentAs<Sent>(0);
+    expect(first.args.refs).toEqual([a, b]);
+    ws.receive({
+      message_id: first.message_id,
+      result: { bodies: { "actions/a": { id: "a" } }, remaining: [b] },
+    });
+    await vi.waitFor(() => expect(ws.sent).toHaveLength(2));
+    const second = ws.sentAs<Sent>(1);
+    expect(second.args.refs).toEqual([b]);
+    ws.receive({
+      message_id: second.message_id,
+      result: { bodies: { "actions/b": { id: "b" } }, remaining: [] },
+    });
+    expect(Object.keys(await pending)).toEqual(["actions/a", "actions/b"]);
+  });
+
+  it("stops and warns when a page makes no progress", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const api = makeApi();
+    const ws = await connect(api);
+    const pending = api.getAutomationBodies([a, b]);
+    ws.receive({
+      message_id: ws.sentAs<Sent>(0).message_id,
+      result: { bodies: {}, remaining: [a, b] },
+    });
+    expect(await pending).toEqual({});
+    expect(ws.sent).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("no progress"), [a, b]);
+    warn.mockRestore();
   });
 });
 

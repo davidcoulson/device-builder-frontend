@@ -13,14 +13,15 @@ import { APIError, CommandTimeoutError } from "./api-error.js";
 import { LivenessMonitor } from "./liveness.js";
 import type {
   AutomationAction,
+  AutomationBodyRef,
   AutomationCatalogBody,
-  AutomationCatalogBodyType,
   AutomationCondition,
   AutomationLocation,
   AutomationTree,
   AutomationTrigger,
   AvailableAutomations,
   Filter,
+  GetAutomationBodiesResponse,
   LightEffect,
   ParsedAutomation,
   YamlDiff,
@@ -1785,23 +1786,32 @@ export class ESPHomeAPI {
   }
 
   /**
-   * Hydrate full automation bodies (config_entries trees) in one
-   * round trip. Each ref is ``{type, id}`` where ``type`` is one of
-   * ``triggers`` / ``actions`` / ``conditions`` / ``light_effects``
-   * / ``filters``. The response is keyed by ``"<type>/<id>"`` and
+   * Hydrate full automation bodies (config_entries trees), following
+   * the backend's ``remaining`` pages until done. Each ref is
+   * ``{type, id}`` where ``type`` is one of ``triggers`` /
+   * ``actions`` / ``conditions`` / ``light_effects`` /
+   * ``filters``. The response is keyed by ``"<type>/<id>"`` and
    * carries the full body. Missing / unknown refs are absent.
    * Callers should go through ``automation-body-cache.ts`` rather
    * than calling this directly; it caches results and coalesces
    * concurrent fetches into one batched call.
    */
   async getAutomationBodies(
-    refs: { type: AutomationCatalogBodyType; id: string }[]
+    refs: AutomationBodyRef[]
   ): Promise<Record<string, AutomationCatalogBody>> {
-    if (refs.length === 0) return {};
-    const bodies = await this.sendCommand<Record<string, AutomationCatalogBody>>(
-      "automations/get_bodies",
-      { refs }
-    );
+    const bodies: Record<string, AutomationCatalogBody> = {};
+    for (let todo = refs; todo.length > 0;) {
+      const page = await this.sendCommand<GetAutomationBodiesResponse>(
+        "automations/get_bodies",
+        { refs: todo }
+      );
+      Object.assign(bodies, page.bodies);
+      if (page.remaining.length >= todo.length) {
+        console.warn("automations/get_bodies made no progress; dropping refs", todo);
+        break;
+      }
+      todo = page.remaining;
+    }
     for (const body of Object.values(bodies)) body.config_entries ??= [];
     return bodies;
   }
